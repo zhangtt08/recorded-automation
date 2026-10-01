@@ -11,7 +11,7 @@
 | 1 | Agent A：浏览器会话与录制 | 受控 Playwright 浏览器；`add_init_script` 录制脚本；`expose_binding` 事件桥；来源校验；录制开始/停止 | `ra/session.py`、`ra/recorder.py`、`ra/ui/record_script.js` | 单标签页 click/input/change/导航形成候选事件；其他 origin 被丢弃并列出原因；密码值不落盘；停止后重新录制可继续（绑定名复用，不重复注册） |
 | 2 | Agent B：归并与工作流编辑 | 候选事件 → `Workflow v1`；候选定位器排序与唯一性检查；审阅/修复界面；JSON Schema 校验 | `ra/normalizer.py`、`ra/ui/index.html`、`ra/ui/app.js` | 录制 `click → fill → click` 输出可人工审阅的 JSON；多匹配标为待修复并保留候选；连续输入合并为一次 `fill`；普通文本与秘密值分开 |
 | 3 | Agent C：回放适配器 | `Driver` 的 Playwright 实现；目标定位、frame/page 映射、动作执行、origin 再检查；`SecretStore` 与持久 `Journal` | `ra/driver.py`、`ra/secrets.py`、`ra/journal.py` | 跑通上面的工作流；目标消失/多匹配/跨 origin 时停在动作之前；动作失败后不重复点击；重启后不自动续跑 |
-| 4 | Agent D：集成与打包 | 会话状态机、运行结果页、取消入口、独立用户数据目录与本地配置 | `ra/session.py`、`ra/shell.py`、`ra/api.py`、`ra/winframe.py`、`build/录放台.spec` | 录制与回放互斥；界面可发起、停止、查看失败步骤；单目录封装版双击可用，窗口无系统标题栏、控制按钮内置 |
+| 4 | Agent D：集成与打包 | 会话状态机、运行结果页、取消入口、独立用户数据目录与本地配置 | `ra/session.py`、`ra/shell.py`、`ra/api.py`、`ra/winframe.py`、`build/录放台.spec` | 录制与回放互斥；界面可发起、停止、查看失败步骤；单文件封装版双击可用，默认全屏无边框、窗口控制按钮内置在标题条里 |
 
 ## 验收证据（本机实测）
 
@@ -22,7 +22,7 @@
 | 窗口内界面自检 | `python -m ra.main --verify` | 29 项全部通过（含保存 → 运行 → 时间线 → 日志 → 删除的完整用户路径） |
 | 封装版 | `dist/录放台/录放台.exe --verify`，同时把 `LOCALAPPDATA` 指向空目录 | 35 行 OK、退出码 0：不依赖本机浏览器缓存，也不读写本机数据目录 |
 
-封装版自带 Chromium（`dist/录放台/ms-playwright/`，约 420MB）；该目录缺失时自动回退到本机 Edge，
+封装版自带 Chromium（`ms-playwright/`，约 420MB）；该目录缺失时自动回退到本机 Edge，
 两者都不可用时界面会给出修复指令。界面截图会写到
 `%LOCALAPPDATA%\RecordedAutomation\ui-shots\ui-{deck,recording,review,run}.png`。
 
@@ -37,6 +37,28 @@
 | 窗口内界面自检 | `python -m ra.main --verify`（同上隔离） | 45 行 OK、0 FAIL、退出码 0（含新增的「审阅页可试跑」「改定位器只重画该卡」「跑完不显示从失败步重试」三项） |
 | Agent API | `python agent/server.py` + curl；`node agent/mcp-server.mjs` 三条握手 | 8 个 `ra.*` 工具；健康/清单/成功调用/缺参数 `bad_input`(400)/未知工具带 `available` 全部符合契约；MCP 的 initialize、tools/list、tools/call 均有响应 |
 | Agent 真跑 | `ra.save_workflow` → `ra.run_workflow` → 失败 → `from_step` 续跑 | completed_unverified 三步时间线、failed/TargetTimeout 停在动作之前、续跑跳过 3 步只执行剩余步骤，全部为真实执行结果 |
+
+## 2026-10-02 一体化窗口返工（针对"多了一层系统边框"）
+
+首轮用 Win32 样式硬去掉 `WS_CAPTION`，实测无效：Chromium 的 `--app` 窗口自己画标题栏，
+清样式后画面里那条标题栏仍在（`PrintWindow` 与屏幕截图都看得到），只是样式位变了 ——
+所以旧自检里那条"无边框"检查是空断言，一路绿灯却骗过了人。这一轮改法与实测：
+
+| 改动 | 依据 |
+| --- | --- |
+| 窗口状态改由 CDP `Browser.setWindowBounds` 控制，默认进入 `fullscreen` | 只有 Chromium 自己处于全屏时才不画标题栏；实测切全屏后 `WS_CAPTION=False` 且窗口矩形 = 显示器矩形 |
+| 关掉 Playwright 的固定视口（`no_viewport`） | 之前页面被锁在 1280×720，全屏后四周留白；现在视口 = 1920×1080 |
+| `ra/winframe.py` 只保留只读探测（找窗口、读样式、读窗口/显示器矩形） | 删掉 `strip_frame/place/drag/toggle_maximize` 等已被证明无效的写法，避免下一个人再踩 |
+| 自检改成不依赖被检对象的黑盒断言 | 新增「Win32 实测：窗口没有系统标题栏」「窗口铺满整块显示器」「页面按真实窗口尺寸渲染」三项，直接读 Win32 与 `innerWidth×dpr` |
+
+| 层次 | 命令 | 结果 |
+| --- | --- | --- |
+| 单元 + 契约 | `python -m unittest discover -s tests -t .` | 73 项全部通过 |
+| 后端链路自检 | `./录放台.exe --selfcheck` | `passed=12/12 failed=0`，退出码 0 |
+| 封装版界面自检 | `./录放台.exe --verify`（`LOCALAPPDATA` 指向空目录） | 48 行 OK、0 FAIL、退出码 0；三项窗口实测证据为 `caption=False`、`rect=(0,0,1920,1080)=monitor`、视口 1920×1080@1 |
+
+窗口按钮语义：`最小化` → CDP `minimized`；`窗口/全屏` → 在 `fullscreen` 与 `normal` 之间切换（切到
+窗口模式时浏览器会带回它自带的标题栏，这是 Chromium 的限制，界面按钮的提示文字已写明）；`关闭` → 退出整个程序。
 
 ## 首轮集成用例的实测结果
 

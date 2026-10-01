@@ -12,15 +12,22 @@ from playwright.sync_api import Error as PlaywrightError
 ATTEMPTS = (("chromium", {}), ("msedge", {"channel": "msedge"}))
 HEADLESS_ATTEMPTS = (("chromium", {}), ("chromium-new-headless", {"channel": "chromium"}),
                      ("msedge", {"channel": "msedge"}))
+UNSET = object()
 
 
 def launch_persistent(pw, profile_dir: Path, *, headless: bool = False, proxy: str = "",
-                      viewport: dict | None = None, args: list[str] | None = None):
-    """返回 (context, engine_name)。无界面时允许用完整 Chromium 的新无界面模式。"""
+                      viewport=UNSET, args: list[str] | None = None):
+    """返回 (context, engine_name)。无界面时允许用完整 Chromium 的新无界面模式。
+
+    viewport 显式传 None 表示不覆盖视口，让页面铺满整个窗口（界面窗口需要）。
+    """
     profile_dir.mkdir(parents=True, exist_ok=True)
     options: dict = {"headless": headless}
-    if viewport:
-        options["viewport"] = viewport
+    if viewport is not UNSET:
+        if viewport is None:
+            options["no_viewport"] = True   # 关掉固定视口，页面按真实窗口尺寸渲染
+        else:
+            options["viewport"] = viewport
     if args:
         options["args"] = list(args)
     if proxy:

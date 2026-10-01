@@ -98,12 +98,14 @@ class Shell:
     title = "录放台"
 
     def __init__(self, ui_dir: Path, profile_dir: Path, on_invoke: Callable[[str, list], object],
-                 on_close: Callable[[], None] | None = None, size=(1360, 900)) -> None:
+                 on_close: Callable[[], None] | None = None, size=(1360, 900),
+                 fullscreen: bool = True) -> None:
         self.ui_dir = Path(ui_dir)
         self.profile_dir = Path(profile_dir)
         self.on_invoke = on_invoke
         self.on_close = on_close
         self.size = size
+        self.fullscreen = fullscreen
         self._tasks: "queue.Queue[tuple]" = queue.Queue()
         self._outbox: "queue.Queue[str | tuple]" = queue.Queue()
         self._stop = threading.Event()
@@ -111,8 +113,9 @@ class Shell:
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ra-api")
         self._pw = None
         self._context = None
+        self._cdp = None
+        self._window_id = 0
         self.page = None
-        self.hwnd = 0
         self.engine = ""
         self.url = ""
         self.error = ""
@@ -164,64 +167,83 @@ class Shell:
         except Exception:
             return False
 
-    # -- 窗口边框 --------------------------------------------------------
-    def _attach_frame(self) -> None:
-        """找到应用窗口并去掉系统标题栏，把窗口控制交给界面自己画。"""
-        try:
-            self._resolve_frame()
-        except Exception:      # 边框控制是增强项，失败也不能影响应用
-            self.hwnd = 0
+    # -- 窗口一体化：全屏时 Chromium 不画自己的标题栏 ---------------------
+    def _init_window(self) -> None:
+        """建立 CDP 会话并进入全屏无边框；失败时退回窗口模式，功能不受影响。
 
-    def _resolve_frame(self) -> None:
+        这里已经在窗口线程上，必须直接调用，不能再走 _remote 排队（会自己等自己）。
+        """
+        self._cdp_open()
+        if self.fullscreen:
+            self._cdp_state("fullscreen")
+
+    def _cdp_open(self) -> bool:
+        try:
+            self._cdp = self._context.new_cdp_session(self.page)
+            self._window_id = self._cdp.send("Browser.getWindowForTarget")["windowId"]
+            return True
+        except Exception:
+            self._cdp = None
+            self._window_id = 0
+            return False
+
+    def _cdp_state(self, state: str) -> str:
+        """只能在窗口线程执行：切换 Chromium 的窗口状态。"""
+        if not self._cdp:
+            return ""
+        try:
+            self._cdp.send("Browser.setWindowBounds",
+                           {"windowId": self._window_id, "bounds": {"windowState": state}})
+        except Exception:
+            return ""
+        if state in ("fullscreen", "normal"):
+            self.fullscreen = state == "fullscreen"
+        return state
+
+    def _remote(self, name: str, *args):
+        """Playwright 对象只能在窗口线程里用，其它线程排队提交。"""
+        future: Future = Future()
+        self._outbox.put(("remote", name, args, future))
+        try:
+            return future.result(timeout=15)
+        except Exception:
+            return None
+
+    def _probe(self) -> dict:
         from . import winframe
 
-        if not winframe.available():
-            return
-        pid = None
-        try:
-            browser = self._context.browser
-            pid = browser.process_id if browser else None
-        except Exception:
-            pid = None
-        deadline = time.time() + 8
-        while time.time() < deadline and not self._stop.is_set():
-            self.hwnd = winframe.find_window(self.title, pid)
-            if self.hwnd:
-                break
-            time.sleep(0.2)
-        if not self.hwnd:
-            return
-        winframe.strip_frame(self.hwnd)
-        winframe.place(self.hwnd, 120, 60, self.size[0], self.size[1])
+        hwnd = winframe.find_window(self.title)
+        rect = winframe.window_rect(hwnd) if hwnd else (0, 0, 0, 0)
+        monitor = winframe.monitor_rect(hwnd) if hwnd else (0, 0, 0, 0)
+        covers = bool(hwnd) and rect != (0, 0, 0, 0) and rect == monitor
+        caption = winframe.has_caption(hwnd) if hwnd else True
+        return {"hwnd": bool(hwnd), "rect": rect, "monitor": monitor, "caption": caption,
+                "frameless": covers and not caption, "fullscreen": self.fullscreen,
+                "cdp": bool(self._cdp), "supported": bool(self._cdp)}
 
     def win_state(self) -> dict:
-        from . import winframe
-
-        frameless = bool(self.hwnd) and not winframe.has_caption(self.hwnd)
-        maximized = bool(self.hwnd) and winframe.is_maximized(self.hwnd)
-        return {"frameless": frameless, "maximized": maximized, "supported": winframe.available()}
+        return self._probe()
 
     def win_drag(self) -> dict:
-        from . import winframe
-
-        return {"ok": winframe.drag(self.hwnd)}
+        # 全屏没有可拖动的边框；窗口模式下由 Chromium 自己的标题栏负责拖动。
+        return {"ok": not self.fullscreen}
 
     def win_minimize(self) -> dict:
-        from . import winframe
-
-        return {"ok": winframe.minimize(self.hwnd)}
+        return {"ok": self._remote("_cdp_state", "minimized") == "minimized"}
 
     def win_maximize(self) -> dict:
-        from . import winframe
+        """最大化按钮 = 全屏无边框 / 窗口模式 切换。"""
+        applied = self._remote("_cdp_state", "normal" if self.fullscreen else "fullscreen")
+        return {"state": applied, "maximized": applied == "fullscreen",
+                "frameless": self._probe()["frameless"]}
 
-        return {"state": winframe.toggle_maximize(self.hwnd), "maximized": winframe.is_maximized(self.hwnd)}
+    def win_fullscreen(self, on: bool = True) -> dict:
+        applied = self._remote("_cdp_state", "fullscreen" if on else "normal")
+        return {"state": applied, "maximized": applied == "fullscreen",
+                "frameless": self._probe()["frameless"]}
 
     def win_close(self) -> dict:
-        from . import winframe
-
-        closed = winframe.close(self.hwnd) if self.hwnd else False
-        if not closed:
-            self._stop.set()
+        self._stop.set()
         return {"ok": True}
 
     def _on_invoke(self, source, request_id: str, method: str, args_json: str) -> None:
@@ -248,15 +270,15 @@ class Shell:
             f"--app={self.url}",
             f"--window-size={self.size[0]},{self.size[1]}",
             f"--window-min-size={max(900, self.size[0] // 2)},{max(600, self.size[1] // 2)}",
-            # 先在屏幕外创建：等去掉系统标题栏后再移进来，避免出现双层标题
-            "--window-position=-32000,-32000",
+            "--window-position=120,60",
             "--disable-features=Translate",
             "--no-default-browser-check",
             "--no-first-run",
         ]
         try:
             self._pw = sync_playwright().start()
-            self._context, self.engine = launch_persistent(self._pw, self.profile_dir, headless=False, args=args)
+            self._context, self.engine = launch_persistent(self._pw, self.profile_dir, headless=False,
+                                                           args=args, viewport=None)
             self._context.expose_binding("__raInvoke", self._on_invoke)
             self._context.set_default_timeout(30_000)
             pages = list(self._context.pages)
@@ -270,7 +292,7 @@ class Shell:
                 self.page.evaluate(BRIDGE_JS)  # 首次加载已完成的兜底注入
             except PlaywrightError:
                 pass
-            self._attach_frame()
+            self._init_window()
             self._pump()
         except PlaywrightError as exc:
             self.error = str(exc).splitlines()[0] if str(exc) else "无法启动应用窗口"
@@ -290,26 +312,9 @@ class Shell:
                 except Exception:
                     pass
 
-    def _guard_frame(self) -> None:
-        """Chromium 有时会把标题栏样式加回来；一旦发现立刻去掉，避免又出现系统边框。"""
-        if not self.hwnd:
-            return
-        try:
-            from . import winframe
-
-            if winframe.has_caption(self.hwnd):
-                winframe.strip_frame(self.hwnd)
-        except Exception:
-            pass
-
     def _pump(self) -> None:
         """Only this thread talks to the page; other threads queue work."""
-        last_guard = time.time()
         while not self._stop.is_set():
-            now = time.time()
-            if now - last_guard > 1.5:
-                last_guard = now
-                self._guard_frame()
             try:
                 item = self._outbox.get(timeout=0.15)
             except queue.Empty:
@@ -327,6 +332,13 @@ class Shell:
                 _, script, future = item
                 try:
                     future.set_result(self.page.evaluate(script))
+                except Exception as exc:  # noqa: BLE001
+                    future.set_exception(exc)
+                continue
+            if kind == "remote":
+                _, name, args, future = item
+                try:
+                    future.set_result(getattr(self, name)(*args))
                 except Exception as exc:  # noqa: BLE001
                     future.set_exception(exc)
                 continue

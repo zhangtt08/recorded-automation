@@ -19,14 +19,29 @@
   const esc = (value) => String(value === undefined || value === null ? "" : value)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-  // 无边框窗口：标题条拖动 + 自绘的窗口按钮
+  // 一体化窗口：全屏时 Chromium 不画自己的标题栏，窗口控制全部由这里接管
+  const ICON_RESTORE = '<svg width="11" height="11" viewBox="0 0 12 12"><rect x="1.8" y="3.6" width="6.4" height="6.4" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.1"></rect><path d="M3.8 3.4V2.2a1 1 0 0 1 1-1h4.2a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1H9.6" fill="none" stroke="currentColor" stroke-width="1.1"></path></svg>';
+  const ICON_EXPAND = '<svg width="11" height="11" viewBox="0 0 12 12"><rect x="2.4" y="2.4" width="7.2" height="7.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"></rect></svg>';
+
+  function paintMaxButton() {
+    const button = $("win-max");
+    if (!button) return;
+    const full = S.fullscreen !== false;
+    button.title = full ? "改成窗口模式（会露出浏览器标题栏）" : "改回全屏无边框";
+    button.setAttribute("aria-label", button.title);
+    button.innerHTML = full ? ICON_RESTORE : ICON_EXPAND;
+  }
+
   async function syncFrame(attempt) {
     try {
       const state = await call("win_state");
-      const frameless = !!(state && state.frameless);
-      document.body.classList.toggle("frameless", frameless);
-      S.frameless = frameless;
-      if (!frameless && (attempt || 0) < 10) setTimeout(() => syncFrame((attempt || 0) + 1), 800);
+      // 全屏 = 没有浏览器自带的标题栏 = 由我们自绘；窗口模式则把标题条让给浏览器
+      const showBar = !!(state && state.fullscreen);
+      document.body.classList.toggle("frameless", showBar);
+      S.frameless = !!(state && state.frameless);
+      S.fullscreen = showBar;
+      paintMaxButton();
+      if (showBar && !S.frameless && (attempt || 0) < 10) setTimeout(() => syncFrame((attempt || 0) + 1), 600);
     } catch (error) {
       document.body.classList.remove("frameless");
     }
@@ -34,12 +49,10 @@
 
   async function toggleMax() {
     const result = await call("win_maximize");
-    const maxed = !!(result && result.maximized);
-    const button = $("win-max");
-    button.title = maxed ? "还原" : "最大化";
-    button.innerHTML = maxed
-      ? '<svg width="11" height="11" viewBox="0 0 12 12"><rect x="1.8" y="3.6" width="6.4" height="6.4" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.1"></rect><path d="M3.8 3.4V2.2a1 1 0 0 1 1-1h4.2a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1H9.6" fill="none" stroke="currentColor" stroke-width="1.1"></path></svg>'
-      : '<svg width="11" height="11" viewBox="0 0 12 12"><rect x="2.4" y="2.4" width="7.2" height="7.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"></rect></svg>';
+    S.fullscreen = !!(result && result.maximized);
+    paintMaxButton();
+    await syncFrame(6);          // 标题栏要跟着真实窗口状态出现或消失
+    if (result && result.state === "") toast("当前引擎不支持窗口切换", "warn");
   }
 
   function wireWindow() {
@@ -55,6 +68,7 @@
     $("win-min").onclick = () => call("win_minimize").catch(() => { });
     $("win-max").onclick = () => toggleMax().catch(() => { });
     $("win-close").onclick = () => call("win_close").catch(() => { });
+    paintMaxButton();
   }
 
   // ---------- bridge ----------

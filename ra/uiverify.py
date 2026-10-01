@@ -149,9 +149,11 @@ FRAME = """
   const style = bar ? getComputedStyle(bar) : null;
   return JSON.stringify({
     visible: !!style && style.display !== 'none',
-    frameless: !document.body.classList.contains('not-frameless'),
+    frameless: document.body.classList.contains('frameless'),
     buttons: document.querySelectorAll('.wbtn').length,
-    viewName: (document.getElementById('tb-view') || {}).textContent
+    viewName: (document.getElementById('tb-view') || {}).textContent,
+    vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
+    cw: document.documentElement.clientWidth, ch: document.documentElement.clientHeight
   });
 }
 """
@@ -350,9 +352,23 @@ def run(window, target_url: str, shots_dir: Path | None = None, session=None) ->
     shot("review")
 
     frame = json.loads(window.evaluate_value(FRAME) or "{}")
-    check("窗口去掉系统边框并自绘标题条", frame.get("frameless") is True and frame.get("visible") is True, str(frame))
+    probe = window._probe() if hasattr(window, "_probe") else {}
+    check("界面按真实窗口状态自绘标题条", frame.get("frameless") is True and frame.get("visible") is True, str(frame))
     check("标题条含三个窗口控制按钮", frame.get("buttons") == 3, str(frame.get("buttons")))
     check("标题条跟随当前界面名", frame.get("viewName") == "审阅与编辑", str(frame.get("viewName")))
+    monitor = probe.get("monitor") or [0, 0, 0, 0]
+    phys_w, phys_h = monitor[2] - monitor[0], monitor[3] - monitor[1]
+    dpr = frame.get("dpr") or 1
+    check("页面按真实窗口尺寸渲染，没有固定视口留白",
+          bool(frame.get("vw")) and abs(frame["vw"] * dpr - phys_w) <= 2
+          and abs(frame["vh"] * dpr - phys_h) <= 2,
+          f"视口 {frame.get('vw')}x{frame.get('vh')}@{dpr} vs 屏幕 {phys_w}x{phys_h}")
+    if probe:
+        check("Win32 实测：窗口没有系统标题栏", probe.get("caption") is False,
+              f"style caption={probe.get('caption')} rect={probe.get('rect')}")
+        check("Win32 实测：窗口铺满整块显示器（一体化全屏）",
+              tuple(probe.get("rect") or ()) == tuple(probe.get("monitor") or ()) != (),
+              f"{probe.get('rect')} vs {probe.get('monitor')}")
 
     window.evaluate_js(FULL_CYCLE)
     end = time.time() + 180
