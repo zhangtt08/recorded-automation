@@ -26,6 +26,18 @@
 两者都不可用时界面会给出修复指令。界面截图会写到
 `%LOCALAPPDATA%\RecordedAutomation\ui-shots\ui-{deck,recording,review,run}.png`。
 
+## 2026-10-02 复核（工程化整理之后重新量的数）
+
+上表是首轮交付当天的记录，仍然有效；这一轮加界面与 Agent API 之后重新跑，数字如下（本机实测）：
+
+| 层次 | 命令 | 结果 |
+| --- | --- | --- |
+| 单元 + 契约 | `python -m unittest discover -s tests -t .` | 73 项全部通过（新增 `tests/test_run_control.py`、`tests/test_agent_api.py`） |
+| 后端链路自检 | `python -m ra.main --selfcheck`（`LOCALAPPDATA` 指向空目录） | `passed=12/12 failed=0` |
+| 窗口内界面自检 | `python -m ra.main --verify`（同上隔离） | 45 行 OK、0 FAIL、退出码 0（含新增的「审阅页可试跑」「改定位器只重画该卡」「跑完不显示从失败步重试」三项） |
+| Agent API | `python agent/server.py` + curl；`node agent/mcp-server.mjs` 三条握手 | 8 个 `ra.*` 工具；健康/清单/成功调用/缺参数 `bad_input`(400)/未知工具带 `available` 全部符合契约；MCP 的 initialize、tools/list、tools/call 均有响应 |
+| Agent 真跑 | `ra.save_workflow` → `ra.run_workflow` → 失败 → `from_step` 续跑 | completed_unverified 三步时间线、failed/TargetTimeout 停在动作之前、续跑跳过 3 步只执行剩余步骤，全部为真实执行结果 |
+
 ## 首轮集成用例的实测结果
 
 | 用例 | 结果 | 证据 |

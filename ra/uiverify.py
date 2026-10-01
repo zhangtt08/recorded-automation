@@ -123,6 +123,16 @@ RECORD_STOP = """
       window.__verify2.steps.push(['review-checks-and-json', checks >= 3 && jsonLines > 3]);
       window.__verify2.steps.push(['state-after-stop', after.state === 'review']);
       window.__verify2.steps.push(['clock-cleared-after-stop', clock === '']);
+      // 审阅页的两个新入口：就地试跑草稿；改定位器时只重画被改的那一张卡片
+      window.__verify2.steps.push(['review-has-trial-button', !!document.getElementById('rev-trial')]);
+      const pick = document.querySelector('#step-list .step button[data-pick]');
+      if (pick) {
+        pick.click();
+        await new Promise((resolve) => setTimeout(resolve, 900));
+      }
+      window.__verify2.steps.push(['review-locator-pick-repaints',
+        !pick || document.querySelectorAll('#step-list .step').length === stepCards]);
+      window.__verify2.steps.push(['no-page-errors-after-locator-edit', !(window.__raErrors || []).length]);
       window.__verify2.done = true;
     } catch (error) {
       window.__verify2 = {done: true, error: String((error && error.message) || error)};
@@ -184,6 +194,8 @@ FULL_CYCLE = """
       push('run-finished', ['completed', 'completed_unverified'].includes(status));
       push('run-timeline-rendered', document.querySelectorAll('#timeline .tstep').length > 0);
       push('run-journal-rendered', document.querySelectorAll('#j-body .j-row').length > 0);
+      // 「从失败步重试」只在失败/取消时出现：跑完了就该是隐藏的，不能给人一个多余的按钮
+      push('run-resume-hidden-when-finished', document.getElementById('run-resume').hidden === true);
       window.__verify3.paused = true;              // 等 Python 截屏后再继续
       for (let attempt = 0; attempt < 200 && !window.__verify3.go; attempt++) await sleep(150);
       document.querySelector('.run-head .back').click();

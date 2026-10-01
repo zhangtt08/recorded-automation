@@ -539,7 +539,8 @@
   function bindStepCard(card, steps) {
     const stepId = card.dataset.step;
     const after = async (only) => { await reloadDraft(only ? stepId : ""); };
-    card.querySelectorAll("button[data-pick]").forEach((button) => {
+    // 「需人工选择」面板里的候选行是 div，但样式带 pointer，必须和上面的候选按钮一样可点
+    card.querySelectorAll("[data-pick]").forEach((button) => {
       button.onclick = async () => {
         await guarded("edit_step", stepId, { selected: parseInt(button.dataset.pick, 10) });
         await after(true);
