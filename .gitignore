@@ -1,0 +1,46 @@
+# Python 字节码与打包产物
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/*
+dist/
+# 打包配置与图标是真实资产，必须入库（build/ 同时是 PyInstaller 的工作目录）
+!build/录放台.spec
+!build/app.ico
+
+# 封装版的可执行文件是打包产物（约 90MB），用 build/录放台.spec 重新生成
+*.exe
+*.dll
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# 本机数据与凭据（工作流、秘密库、日志都在 %LOCALAPPDATA%\RecordedAutomation，不在仓库里）
+.env
+.env.*
+*.local.json
+
+# 运行与自测留下的临时产物
+/ms-playwright/
+/profile/
+/shell-profile/
+/exports/
+/ui-shots/
+/selfcheck/
+/selfcheck-report.txt
+/verify-report.txt
+/startup-error.txt
+*.log
+agent/.endpoint
+
+# 编辑器与系统垃圾
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store

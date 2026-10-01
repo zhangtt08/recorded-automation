@@ -1,0 +1,17 @@
+# 统一行尾：仓库里存 LF，检出也保持 LF（Windows 上避免整文件行尾抖动）
+* text=auto eol=lf
+
+*.py    text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.spec  text eol=lf
+*.gitignore text eol=lf
+
+*.png binary
+*.ico binary
+*.exe binary
+*.dll binary

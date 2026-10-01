@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>录放台</title>
+<link rel="icon" type="image/png" href="icon.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="frame">
+  <div class="titlebar" id="titlebar">
+    <span class="tb-mark" aria-hidden="true">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="7"></circle><path d="M12 8v4l3 2"></path></svg>
+    </span>
+    <span class="tb-name">录放台</span>
+    <span class="tb-view" id="tb-view">工作台</span>
+    <span class="tb-status" id="tb-status"></span>
+    <span class="grow"></span>
+    <span class="tb-hint" id="tb-hint"></span>
+    <span class="wbtns" id="wbtns">
+      <button class="wbtn" id="win-min" title="最小化" aria-label="最小化">
+        <svg width="11" height="11" viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.2"></path></svg>
+      </button>
+      <button class="wbtn" id="win-max" title="最大化" aria-label="最大化">
+        <svg width="11" height="11" viewBox="0 0 12 12"><rect x="2.4" y="2.4" width="7.2" height="7.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"></rect></svg>
+      </button>
+      <button class="wbtn close" id="win-close" title="关闭" aria-label="关闭">
+        <svg width="11" height="11" viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.2"></path></svg>
+      </button>
+    </span>
+  </div>
+<div class="app">
+  <aside class="nav">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="7"></circle><path d="M12 8v4l3 2"></path>
+        </svg>
+      </span>
+      <div>
+        <h1>录放台</h1>
+        <p class="sub">REC · REPLAY</p>
+      </div>
+    </div>
+
+    <div class="nav-group">
+      <p class="nav-label">工作区</p>
+      <button class="nav-item active" data-view="deck">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 10h18"></path></svg>
+        工作流 <span class="count" id="nav-workflows">0</span>
+      </button>
+      <button class="nav-item" data-view="history">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12a8 8 0 1 0 3-6.2"></path><path d="M4 4v5h5"></path></svg>
+        运行历史 <span class="count" id="nav-runs">0</span>
+      </button>
+      <button class="nav-item" data-view="secrets">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="10" width="16" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
+        秘密库 <span class="count" id="nav-secrets">0</span>
+      </button>
+      <button class="nav-item" data-view="settings">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M12 3v2m0 14v2m9-9h-2M5 12H3m14.5-6.5-1.4 1.4M7.9 16.1l-1.4 1.4m11 0-1.4-1.4M7.9 7.9 6.5 6.5"></path></svg>
+        设置
+      </button>
+    </div>
+
+    <div class="nav-group">
+      <p class="nav-label">约束 · 首版</p>
+      <p class="nav-item plain">单标签页 · 单来源</p>
+      <p class="nav-item plain">动作只执行一次</p>
+    </div>
+
+    <div class="nav-foot">
+      <span class="idle-line"><span class="lamp" id="state-lamp"></span><span id="state-text">正在连接后端…</span><span class="tcid mono" id="state-clock"></span></span>
+      <p class="nav-note" id="engine-note">—</p>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="busy-bar" id="busy-bar"></div>
+
+    <!-- 工作台 -->
+    <section class="view" id="view-deck">
+      <div class="main-head">
+        <p class="eyebrow">DECK · <span class="dim">工作台</span></p>
+        <div class="head-row">
+          <h2 class="page-title">工作流</h2>
+          <div class="actions"><button class="btn small" id="deck-refresh">刷新</button></div>
+        </div>
+        <p class="page-sub">在受控浏览器里录制一次操作，审阅保存后随时回放。</p>
+      </div>
+
+      <div class="stats" id="deck-stats"></div>
+
+      <section class="card composer">
+        <div class="composer-head">
+          <span class="lamp rec"></span>
+          <span class="t">发起录制</span>
+          <span class="mut">录制与回放互斥，进行中不能同时运行工作流</span>
+        </div>
+        <div class="composer-row">
+          <label class="url-input">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"></path><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"></path></svg>
+            <input id="record-url" type="text" placeholder="https://site.test/page — 只录制该来源内的操作" spellcheck="false">
+          </label>
+          <button class="btn primary big" id="record-start"><span class="rec-dot"></span>开始录制</button>
+        </div>
+        <p class="composer-hint">单标签页 · 单来源 · 动作类型
+          <span class="k">click</span><span class="k">fill</span><span class="k">hotkey</span><span class="k">wait_for</span>
+          · 密码输入只保存引用
+        </p>
+      </section>
+
+      <div class="list-head">
+        <span class="t">已保存的工作流</span><span class="n" id="wf-count">0 条</span>
+        <span class="sort">按最近保存排序</span>
+      </div>
+      <div class="wf-list" id="wf-list"></div>
+
+      <div class="list-head">
+        <span class="t">最近运行</span><span class="n" id="run-count">0 条记录</span>
+        <span class="sort"><button class="btn small" data-view="history">查看全部</button></span>
+      </div>
+      <div class="card recent" id="recent-runs"></div>
+
+      <footer class="safety">
+        <span><b>本地单进程</b>，无远程服务</span><span class="sep"></span>
+        <span>工作流与日志<b>不保存密码明文</b></span><span class="sep"></span>
+        <span>结果不确定时<b>不自动重试</b></span>
+      </footer>
+    </section>
+
+    <!-- 录制中 -->
+    <section class="view" id="view-recording" hidden>
+      <div class="transport">
+        <div class="rec-brand">
+          <span class="lamp rec"></span>
+          <span class="rec-word">REC</span>
+          <span class="tcid mono" id="rec-time">00:00:00</span>
+          <span class="rec-state" id="rec-state">录制中 · 受控浏览器</span>
+        </div>
+        <span class="chip scope-chip" id="rec-scope">仅记录本页来源内的操作</span>
+        <span class="grow"></span>
+        <span class="step-count" id="rec-count">候选步骤 0 · 已丢弃 0</span>
+        <button class="btn" id="rec-open-browser">查看浏览器</button>
+        <button class="btn primary" id="rec-stop">停止并审阅</button>
+      </div>
+      <div class="rec-body">
+        <div class="browser-wrap">
+          <div class="browser">
+            <div class="bw-chrome">
+              <span class="dots"><i></i><i></i><i></i></span>
+              <span class="addr" id="rec-url">—</span>
+              <span class="bw-tag">受控浏览器 · 实时预览</span>
+            </div>
+            <div class="shot">
+              <img id="rec-shot" alt="受控浏览器画面" hidden>
+              <div class="shot-hint" id="rec-shot-hint">
+                <b>受控浏览器已在另一个窗口打开</b>
+                在那里操作网页；本面板同步显示画面与候选步骤。
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="perf spacer" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <section class="panel">
+          <div class="panel-head">
+            <span class="t">正在生成的步骤</span><span class="n">候选</span>
+            <p class="s">保存前需逐条人工审阅 · 连续输入自动合并为一次 fill</p>
+          </div>
+          <div class="cap-list" id="cap-list"></div>
+          <div class="drop-zone" id="drop-zone"></div>
+          <div class="panel-foot">候选事件经<b>人工审阅</b>后才写入工作流；定位器按 <b>role → label → test_id → text → css</b> 优先级生成。</div>
+        </section>
+      </div>
+    </section>
+
+    <!-- 审阅与编辑 -->
+    <section class="view" id="view-review" hidden>
+      <div class="rev-head">
+        <button class="back" data-view="deck" title="返回工作台">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"></path></svg>
+        </button>
+        <span class="title" id="rev-title">审阅录制结果</span>
+        <span class="chips" id="rev-chips"></span>
+        <span class="grow"></span>
+        <span class="save-warn" id="rev-warn"></span>
+        <button class="btn" id="rev-refresh">重新校验唯一性</button>
+        <button class="btn" id="rev-export">导出 JSON</button>
+        <button class="btn" id="rev-trial" title="按当前草稿立即运行一次，不需要先保存">试运行草稿</button>
+        <button class="btn primary" id="rev-save">校验并保存</button>
+      </div>
+      <div class="rev-body">
+        <div class="steps-col">
+          <div class="steps-label">步骤序列 · 选择定位器、补充完成条件，点击按钮编辑
+            <button class="btn small" id="rev-add-step">添加等待步骤</button>
+          </div>
+          <div id="step-list"></div>
+        </div>
+        <div class="right-col">
+          <section class="card checks" id="meta-card">
+            <div class="card-t">工作流信息</div>
+            <div class="field" style="margin-top:10px">
+              <input type="text" id="review-name" class="wide" placeholder="工作流名称" maxlength="60">
+              <input type="text" id="review-id" placeholder="workflow id" maxlength="64" style="width:150px">
+            </div>
+            <p class="ghost-hint" id="meta-start">—</p>
+          </section>
+          <section class="card checks">
+            <div class="card-t">保存前检查<span class="n" id="check-count"></span></div>
+            <div id="check-list"></div>
+          </section>
+          <section class="card json-card">
+            <div class="json-head">
+              <span class="fn" id="json-filename">workflow.json</span>
+              <button class="btn small cp" id="json-copy">复制</button>
+            </div>
+            <div class="json-body" id="json-body"></div>
+            <div class="json-foot" id="json-foot"></div>
+          </section>
+        </div>
+      </div>
+      <footer class="safety">
+        <span>候选定位器按 <b>role → label → test_id → text → css</b> 排序</span><span class="sep"></span>
+        <span><b>多匹配必须人工选择</b>，不退化为坐标</span><span class="sep"></span>
+        <span>start_url 含令牌将被拒绝保存</span>
+      </footer>
+    </section>
+
+    <!-- 运行结果 -->
+    <section class="view" id="view-run" hidden>
+      <div class="run-head">
+        <button class="back" data-view="deck" title="返回工作台">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"></path></svg>
+        </button>
+        <span class="title" id="run-title">运行</span>
+        <span class="chips" id="run-chips"></span>
+        <span class="grow"></span>
+        <span class="run-meta" id="run-meta"></span>
+        <button class="btn" id="run-cancel">停止</button>
+        <button class="btn" id="run-resume" hidden>从失败步重试</button>
+        <button class="btn primary" id="run-again">重新运行</button>
+      </div>
+      <div class="card legend">
+        <span class="lg-t">RESULT STATES</span>
+        <span class="lg"><span class="status-chip ok"><span class="lamp"></span>完成</span></span>
+        <span class="lg"><span class="status-chip info"><span class="lamp"></span>完成 · 未验证</span></span>
+        <span class="lg"><span class="status-chip warn"><span class="lamp"></span>未确认 — 需人工检查</span></span>
+        <span class="lg"><span class="status-chip bad"><span class="lamp"></span>失败</span></span>
+        <span class="lg"><span class="status-chip"><span class="lamp"></span>已取消</span></span>
+        <span class="note">动作只执行一次，任何不确定结果都会停在当前步骤</span>
+      </div>
+      <div class="run-body">
+        <div class="tl-col">
+          <p class="tl-label">步骤时间线 · TIMELINE</p>
+          <div id="timeline"></div>
+        </div>
+        <div class="right-col">
+          <section class="card tstep-detail" id="run-detail"></section>
+          <section class="card recheck" id="run-recheck" hidden></section>
+          <section class="card journal">
+            <div class="j-head">
+              <span class="t">运行日志</span><span class="fn" id="j-filename">journal.jsonl</span>
+              <span class="mark">action_started 先落盘再执行</span>
+            </div>
+            <div class="j-body" id="j-body"></div>
+            <div class="j-foot">日志只含 <b>运行 / 步骤 ID · 阶段 · 错误码</b>，不含输入内容与秘密值；日志只记录事实，<b>不反写工作流</b>。</div>
+          </section>
+        </div>
+      </div>
+      <footer class="safety">
+        <span><b>动作只执行一次</b>，异常后不重试</span><span class="sep"></span>
+        <span>结果不确定<b>立即停止</b>，等待人工检查</span><span class="sep"></span>
+        <span>程序重启后<b>不自动续跑</b></span>
+      </footer>
+    </section>
+
+    <!-- 运行历史 -->
+    <section class="view scroll" id="view-history" hidden>
+      <div class="main-head">
+        <p class="eyebrow">HISTORY · <span class="dim">运行历史</span></p>
+        <h2 class="page-title">运行历史</h2>
+        <p class="page-sub">每次运行只追加事实日志；点击一行查看步骤时间线与人工检查清单。</p>
+      </div>
+      <div class="card recent" id="history-list"></div>
+    </section>
+
+    <!-- 秘密库 -->
+    <section class="view scroll" id="view-secrets" hidden>
+      <div class="main-head">
+        <p class="eyebrow">VAULT · <span class="dim">秘密库</span></p>
+        <h2 class="page-title">秘密库</h2>
+        <p class="page-sub">工作流里只保存引用名。运行前把值填进来，值用 Windows 账户加密后保存在本机。</p>
+      </div>
+      <div class="card table" id="secret-table"><div class="empty">正在读取本机秘密库…</div></div>
+      <section class="set-grid">
+        <div class="card set-row">
+          <div class="lab"><p class="t">手动新增引用</p><p class="d">给工作流中用到的 secret_ref 提前赋值</p></div>
+          <div class="val">
+            <input type="text" id="secret-ref" placeholder="引用名" style="width:200px">
+            <input type="password" id="secret-value" placeholder="值（不会出现在工作流里）">
+            <button class="btn primary" id="secret-add">保存</button>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <!-- 设置 -->
+    <section class="view scroll" id="view-settings" hidden>
+      <div class="main-head">
+        <p class="eyebrow">SETUP · <span class="dim">设置</span></p>
+        <h2 class="page-title">设置</h2>
+        <p class="page-sub">受控浏览器与本机数据。</p>
+      </div>
+      <div class="set-grid">
+        <div class="card set-row">
+          <div class="lab"><p class="t">步骤默认超时</p><p class="d">新增步骤的 timeout_s，单位秒（1–120）</p></div>
+          <div class="val"><input type="number" id="set-timeout" min="1" max="120" step="1"><span class="chip mono">s</span></div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">受控浏览器无界面运行</p><p class="d">自检与后台运行用；录制时需要看见页面</p></div>
+          <div class="val"><button class="switch" id="set-headless"><span class="track"><i></i></span><span class="txt">关闭</span></button></div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">运行后保留浏览器</p><p class="d">关闭后每次运行结束自动退出受控浏览器</p></div>
+          <div class="val"><button class="switch" id="set-keep"><span class="track"><i></i></span><span class="txt">开启</span></button></div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">浏览器代理</p><p class="d">留空则跟随系统；可填 http://host:port</p></div>
+          <div class="val"><input type="text" id="set-proxy" placeholder="留空 = 系统设置"></div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">保存设置</p><p class="d">改动写入本机 settings.json，重启后生效</p></div>
+          <div class="val"><button class="btn primary" id="set-save">保存</button></div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">清空浏览器登录态</p><p class="d">删除独立用户数据目录，下次启动为全新会话</p></div>
+          <div class="val"><button class="btn" id="set-profile">清空</button><span class="path-line" id="profile-path"></span></div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">关闭受控浏览器</p><p class="d">立即结束浏览器进程，工作流与日志保留</p></div>
+          <div class="val"><button class="btn" id="set-close-browser">关闭</button></div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">本机数据目录</p><p class="d">工作流、秘密库、日志、浏览器档案都在这里</p></div>
+          <div class="val"><button class="btn small" id="set-reveal">打开目录</button></div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">数据目录路径</p><p class="path-line" id="data-path">—</p></div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">浏览器引擎</p><p class="d">受控浏览器与界面窗口共用的引擎</p></div>
+          <div class="val"><span class="chip mono" id="engine-line">未启动</span></div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">快捷键</p><p class="d">在应用窗口内直接可用</p></div>
+          <div class="val keys">
+            <span><kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>5</kbd> 切换界面</span>
+            <span><kbd>Enter</kbd> 开始录制</span>
+            <span><kbd>Ctrl</kbd>+<kbd>S</kbd> 校验并保存</span>
+            <span><kbd>Esc</kbd> 关闭对话框</span>
+          </div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">版本</p><p class="d" id="about-line">—</p></div>
+          <div class="val"><button class="btn" id="set-selfcheck">运行端到端自检</button></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-card">
+    <p class="modal-title" id="modal-title"></p>
+    <p class="modal-detail" id="modal-detail"></p>
+    <textarea class="modal-body mono" id="modal-body" readonly hidden></textarea>
+    <div class="modal-actions">
+      <button class="btn" id="modal-cancel">取消</button>
+      <button class="btn" id="modal-close" hidden>关闭</button>
+      <button class="btn primary" id="modal-ok">确定</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toasts"></div>
+<script src="app.js"></script>
+</body>
+</html>

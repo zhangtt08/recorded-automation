@@ -1,0 +1,5 @@
+{
+  "command": "C:\\Program Files\\Python312\\python.exe",
+  "args": ["agent/server.py"],
+  "ready_port": 8795
+}

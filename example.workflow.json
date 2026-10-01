@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "id": "demo-contact-form",
+  "name": "示例：客户留言表提交",
+  "origin": "https://example.com",
+  "start_url": "https://example.com/contact",
+  "steps": [
+    {
+      "id": "open-form",
+      "action": "click",
+      "target": {
+        "page": "main",
+        "locators": [{ "strategy": "role", "value": "button", "name": "Contact" }]
+      },
+      "expected": {
+        "page": "main",
+        "locators": [{ "strategy": "label", "value": "Email" }]
+      }
+    },
+    {
+      "id": "enter-email",
+      "action": "fill",
+      "target": {
+        "page": "main",
+        "locators": [{ "strategy": "label", "value": "Email" }]
+      },
+      "text": "user@example.com"
+    },
+    {
+      "id": "enter-password",
+      "action": "fill",
+      "target": {
+        "page": "main",
+        "locators": [{ "strategy": "label", "value": "Password" }]
+      },
+      "secret_ref": "example_com_密码_1"
+    },
+    {
+      "id": "submit",
+      "action": "click",
+      "target": {
+        "page": "main",
+        "locators": [{ "strategy": "role", "value": "button", "name": "Send" }]
+      },
+      "expected": {
+        "page": "main",
+        "locators": [{ "strategy": "text", "value": "Message sent" }]
+      },
+      "timeout_s": 15.0
+    }
+  ]
+}
