@@ -1111,6 +1111,12 @@
     S.runs = result.runs || [];
     $("nav-runs").textContent = S.runs.length;
     renderRecent(S.runs, "history-list");
+    const note = $("history-note");
+    if (note) {                       // 日志轮转过的话，这一屏列出的就不是全部 —— 把那句话摊开在页面上
+      const journal = result.journal || {};
+      note.hidden = !journal.trimmed;
+      note.textContent = journal.trimmed ? ("运行日志有上限：" + (journal.note || "更早的归档已被删除。")) : "";
+    }
   }
 
   async function refreshSecrets() {

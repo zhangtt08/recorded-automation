@@ -111,6 +111,7 @@ class Api:
             "resources": str(resource_root()),
             "workflows": self.store.list(),
             "runs": self._runs_with_names(),
+            "journal": self.journal.stats(),
             "secrets": self.secrets.preview(),
             "settings": self.settings.all(),
             "bundled": bool(getattr(sys, "_MEIPASS", None)),
@@ -273,7 +274,10 @@ class Api:
         return self._guard(self.session.cancel_run)
 
     def list_runs(self) -> dict:
-        return self._guard(lambda: {"runs": self._runs_with_names()})
+        def work():
+            # 日志被轮转过就要说出来：只把「最近的运行」摊在界面上，等于把删过档这件事藏起来。
+            return {"runs": self._runs_with_names(), "journal": self.journal.stats()}
+        return self._guard(work)
 
     def run_detail(self, run_id: str) -> dict:
         def work():

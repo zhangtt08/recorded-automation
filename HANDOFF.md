@@ -375,3 +375,51 @@ app.js 一处引号未转义让整屏界面停在"正在连接后端"；界面�
    已改回 `http://127.0.0.1:8795`。**新代码认这个 env，所以测试不会再碰仓库里那一份。**
 2. 断言一律写成 `body.get("error", {}).get("code")` 而不是 `body["error"]["code"]`：
    防护不在时响应是 200 + data，直接下标会让测试在夹具里炸掉，评审要的"每条都能红"就变成"整组 ERROR"。
+
+## 2026-10-05 验收返工第二轮：运行日志从「无限增长 + 读的时候丢头」改成「有界 + 删过档要说出来」
+
+评审 MAJOR #3 的原话是 `journal.py:32-62` 一路 append 到底，`TAIL_BYTES` 只限制**读取**。
+这个形状有两层害处，第二层才是它真正在拦的东西：
+
+1. 文件永远在涨，谁也没给它上过界。
+2. `list_runs()` 只读尾部 → 最早那几次运行**静默**消失；界面与 Agent 拿到的都是「最近的运行」，
+   而"最近"其实是「从某一个没被记录的位置往后」。第 5 项评审要求"不许回退的好东西"里有一条
+   `scrub()` 把已填值从原因里抹掉 —— 那套诚实的账本，被这个静默截断抵了一部分。
+
+### 做法
+
+`ra/journal.py`：`MAX_BYTES = 2_000_000` 一份、`KEEP = 2` 份归档（`journal.jsonl.1` / `.2`）。
+到线就整份轮转而不是就地截头 —— 一次运行的事件不能被切成两半，切头会让 `read_run` 对早期运行
+永远查无此事还不留痕迹。`_recent_lines()` 现在按时间顺序把现存几份拼起来（旧归档在前），
+`TAIL_BYTES` 相应放大到「一份之内必读全」，有界性交给轮转而不是交给跳过。
+
+诚实的那一半：每次轮转往新的一份里写一条 `journal_rotated` 标记，带
+`archived_bytes / archived_to / dropped_bytes / dropped_file / keep / max_bytes` 与一句人话，
+`run_id` 为空所以不会在历史列表里冒充一次运行。`stats()` 把它连各份真实磁盘大小一起返回，出口三处：
+`Api.list_runs()`、`Api.app_info()` 的 `journal` 字段，和 `ra.status` / `ra.run_history` 工具返回。
+界面运行历史页加一行 `#history-note`（只有真删过档才露面）；`ra.run_history` 查不到某个 run_id 时，
+错误信息里带上那句轮转说明。没轮转过时它写的是「还没有轮转过：现在读到的是这台机器上全部的运行日志」，
+这样"读到的是全部"这句话在两种情况下都有出处。
+
+`keep=0` 这一档在实现里露过一次：整份被丢弃时 `dropped_bytes` 仍然报 0 —— 那是同一句谎话的另一个版本，
+已改成「丢的就是这一整份」，并有 `test_keep_zero_still_bounds_the_file` 钉住。
+
+### 红→绿实测（`git checkout HEAD -- ra/journal.py ra/api.py agent/tools.py ra/ui/app.js ra/ui/index.html`）
+
+`tests/test_journal_bounds.py` 11 条，退回修复前 **11 条全红**：
+
+- 8 条落在夹具的换算句上：`AssertionError: FileJournal 没有体积上界参数（… unexpected keyword argument
+  'max_bytes'）—— 就是「一路 append 不封顶」那一条`（刻意写成断言而不是让 TypeError 直接逃出去）
+- `test_api_list_runs_carries_the_journal_notice` → `'journal' not found in {'runs': []}`
+- `test_app_info_carries_it_too` → `'journal' not found in {'title': '录放台', …}`
+- `test_run_history_and_status_tools_report_the_trim` → `'journal' not found in {'rows': […]}`
+- 三条出口全红 + 上界本体全红，正是评审要的形态：限制、边界、报告三件事各自有证据
+
+两条夹具教训（都会再踩）：
+
+1. `ROTATION_PHASE` 必须 `getattr(journal_module, …, "journal_rotated")` 取。直接 `from ra.journal import
+   ROTATION_PHASE` 会在**旧版**上把整个模块的 import 打断，11 条塌成 1 条 ImportError，
+   "每条都能红"就没了。
+2. 工具侧的 `_journal()` 读 `data_root()/journal.jsonl`，界面侧的 `build(root)` 用传进去的 root。
+   测试要同时钉住 `LOCALAPPDATA` 与 `build(<LOCALAPPDATA>/RecordedAutomation)`，
+   否则两边读的是不同文件，第 4 条出口断言会假绿。

@@ -172,6 +172,7 @@ def _status(input: dict) -> dict:
         "frozen": bool(getattr(sys, "frozen", False)),
         "workflows": len(store.list()),
         "runs": len(_journal().list_runs(limit=500)),
+        "journal": _journal().stats(),
         "secret_refs": [item["ref"] for item in secrets.preview()],
         "settings": settings.all(),
         "serving": {"in_process": bound(),
@@ -347,13 +348,17 @@ def _run_history(input: dict) -> dict:
             if owned:
                 session.shutdown()
         if not detail.get("events"):
-            raise AgentError("not_found", f"日志里没有 {run_id} 这个阶段事件；最近运行可用不带 run_id 的调用查到")
+            stats = journal.stats()
+            extra = f"（{stats['note']}）" if stats["trimmed"] else ""
+            raise AgentError("not_found",
+                             f"日志里没有 {run_id} 这个阶段事件{extra}；最近运行可用不带 run_id 的调用查到")
         timeline = detail.get("timeline") or []
         return {"run": {key: detail.get(key) for key in (
             "run_id", "workflow_id", "workflow_name", "status", "status_label", "code", "step_id",
             "started_at", "duration_s", "steps_total", "steps_run", "steps_unverified", "durable")},
             "timeline": timeline[:MAX_TIMELINE], "timeline_truncated": len(timeline) > MAX_TIMELINE,
             "events": detail.get("events") or [], "journal_path": detail.get("journal_path", ""),
+            "journal": journal.stats(),
             "resumed": detail.get("resumed") or {},
             "note": "结果分类沿用 ra/core.py：failed 表示动作之前停止，uncertain 表示动作已发出但无法确认"}
     limit = max(1, min(int(input.get("limit") or 30), 200))
@@ -369,7 +374,11 @@ def _run_history(input: dict) -> dict:
             "code": row["code"], "steps": row["steps"], "duration_s": row["duration_s"],
             "started_at": row["started_at"], "ended_at": row["ended_at"],
         })
-    return _clip(rows, limit)
+    result = _clip(rows, limit)
+    stats = journal.stats()
+    if stats["trimmed"]:          # 轮转过的话，这份"最近运行"不是全部 —— 必须随结果一起说出来
+        result["journal"] = stats
+    return result
 
 
 def _secret_refs(input: dict) -> dict:
