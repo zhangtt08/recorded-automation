@@ -75,13 +75,22 @@
 # 程序开着的时候，端点就已经在听了（默认 8795，被占自动 +1，实际地址写在 agent/.endpoint）
 curl -s http://127.0.0.1:8795/api/health
 curl -s http://127.0.0.1:8795/api/agent/tools
+# 写操作（非 GET）要带本机共享令牌；令牌由程序启动时写进 %LOCALAPPDATA%\RecordedAutomation\agent-token
+TOKEN="$(cat "$LOCALAPPDATA/RecordedAutomation/agent-token")"
 curl -s -X POST http://127.0.0.1:8795/api/agent/tool -H 'content-type: application/json' \
-     -d '{"tool":"ra.status","input":{}}'
-node agent/mcp-server.mjs        # MCP stdio 桥；服务没起来会按 agent/launch.json 自己拉起
-python agent/server.py           # 不想开界面时，也能单独起一个同契约的服务
+     -H "x-agent-token: $TOKEN" -d '{"tool":"ra.status","input":{}}'
+node agent/mcp-server.mjs        # MCP stdio 桥：自动读令牌文件，本机合法 Agent 不需要手工传
+python agent/server.py           # 不想开界面时，也能单独起一个同契约的服务（同一把令牌）
 ```
 
-工具按风险分三档，**write / exec 一律要在 `input` 里显式传 `confirm:true`**，缺了就返回 `bad_input`：
+**谁能调用**：只监听 127.0.0.1，并且每个请求都过 `ra/localguard.py` 的四道闸门 —— `Host` 必须是回环名
+（挡 DNS rebinding）、`Origin`/`Referer` 不是回环就拒、所有非 GET 必带 `x-agent-token`、
+任何响应都不发通配 CORS（网页连预检都过不去）。这一条是 2026-10-05 验收返工补的：
+补之前用户访问的任意网页都能驱动全部 25 个工具。判据、令牌位置与手动调用写法详见 `agent/README.md`。
+
+工具按风险分三档，**write / exec 一律要在 `input` 里显式传 `confirm:true`**，缺了就返回 `bad_input`。
+`confirm` 是给 Agent 的二次确认（防手滑），不是安全边界 —— 它是请求体里的一个值，任何调用方都能自己写；
+决定"谁能发出这个请求"的是上面那道令牌闸门。
 
 | 档 | 工具 |
 | --- | --- |
@@ -154,6 +163,7 @@ python agent/server.py           # 不想开界面时，也能单独起一个同
 | `ra/store.py` `ra/journal.py` `ra/secrets.py` | 工作流存储与校验、落盘日志、DPAPI 秘密库 |
 | `ra/shell.py` `ra/winframe.py` `ra/engine.py` | 无边框一体化窗口（CDP + Win32 兜底、像素标定）、JS↔Python 桥、引擎选择与回退 |
 | `ra/agentapi.py` | 进程内 Agent 接口服务：与界面共用同一套会话与存储 |
+| `ra/localguard.py` | 本机服务共用闸门：Host / Origin / Referer / 令牌（两个入口都走这一份判据） |
 | `ra/api.py` `ra/ui/` | 界面门面与前端（工作台/录制/审阅/运行/历史/秘密库/Agent 接口/设置） |
 | `ra/selfcheck.py` `ra/uiverify.py` `ra/fixture.py` | 端到端自检、窗口内自检、本地测试站点 |
 | `agent/` | 独立服务、工具层与 MCP 桥（界面进程内跑的是同一份 `tools.py`） |

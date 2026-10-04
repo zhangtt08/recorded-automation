@@ -8,6 +8,9 @@ POST /api/agent/tool），区别只有两点：
 
 工具表从 agent/tools.py 加载（源码运行与封装版都走这条路径），加载失败时界面会显示原因，
 而不是假装服务已经就绪。
+
+鉴权与防护统一走 `ra/localguard.py`（与 agent/server.py 同一份判据）：Host 必须是回环名、
+Origin/Referer 必须匹配本机、所有非 GET 都要带本机共享令牌，并且任何响应都不发通配 CORS。
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
+from . import localguard
 from .paths import resource_root
 
 MAX_BODY = 8 * 1024 * 1024
@@ -90,7 +94,10 @@ class AgentServer:
         self.project: dict[str, Any] = {}
         self.started_at = time.time()
         self.calls = 0
+        self.denied = 0                       # 被防护层拦下的请求数（界面与自检都要看得见它涨过）
         self.error_cls: type = AgentApiError
+        self.token = ""
+        self.token_file = ""
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -103,6 +110,10 @@ class AgentServer:
             self.error = f"{type(exc).__name__}: {exc}"
             return self
         self.project, self.tools = project, tools
+        # 令牌先于监听就位：宁可拿不到文件（退回进程内临时令牌，于是所有调用方都调不动），
+        # 也不许在「存不下秘密」的时候退回到无鉴权。
+        self.token, token_path = localguard.load_token()
+        self.token_file = str(token_path)
         if self.api is not None:
             try:
                 bind(self.api, self.session)
@@ -113,23 +124,59 @@ class AgentServer:
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+            server_version = "RecordedAutomation-Agent/1"
 
             def _send(self, status: int, body: dict[str, Any]) -> None:
-                raw = json.dumps(body, ensure_ascii=False, default=str).encode("utf-8")
+                raw = localguard.json_bytes(body)
                 self.send_response(status)
                 self.send_header("content-type", "application/json; charset=utf-8")
                 self.send_header("content-length", str(len(raw)))
-                self.send_header("access-control-allow-origin", "*")
+                # 不发 access-control-allow-origin：这个端点只给本机程序用，
+                # 任何网页想读都得先过同源策略。写操作上更是一条都不许有通配 CORS。
                 self.send_header("cache-control", "no-store")
                 self.end_headers()
                 self.wfile.write(raw)
 
+            def _drain(self) -> None:
+                """拒绝之前先把请求体读干净，否则 HTTP/1.1 复用连接会把残留字节当成下一个请求。"""
+                try:
+                    length = int(self.headers.get("content-length") or 0)
+                except ValueError:
+                    length = 0
+                if length > 0:
+                    try:
+                        self.rfile.read(min(length, MAX_BODY))
+                    except OSError:
+                        pass
+
+            def _deny(self, error: localguard.GuardError) -> None:
+                outer.denied += 1
+                self._drain()
+                self.close_connection = True        # 拒绝之后不复用这条连接，避免残留字节被当成下一个请求
+                self._send(error.status, localguard.guard_payload(
+                    error, endpoint_hint="本机 Agent 请读 agent/.endpoint 与令牌文件；见 agent/README.md"))
+
+            def _guard(self) -> bool:
+                """True = 可以继续处理。Host / Origin / Referer / 令牌四道闸门都在这里。"""
+                try:
+                    localguard.check_headers(self.headers, outer.port)
+                    localguard.check_token(self.command, self.headers, outer.token)
+                except localguard.GuardError as error:
+                    self._deny(error)
+                    return False
+                return True
+
             def do_OPTIONS(self) -> None:  # noqa: N802
+                """预检：不带任何 access-control-* 头。浏览器页面过不了预检，就发不出真正的写请求。"""
+                self._drain()
                 self.send_response(204)
-                self.send_header("access-control-allow-headers", "content-type")
+                self.send_header("content-length", "0")
+                self.send_header("cache-control", "no-store")
                 self.end_headers()
 
             def do_GET(self) -> None:  # noqa: N802
+                if not self._guard():
+                    return
                 route = self.path.split("?")[0].rstrip("/") or "/"
                 base = f"http://{outer.host}:{outer.port}"
                 if route == "/api/health":
@@ -137,6 +184,8 @@ class AgentServer:
                         "project": outer.project.get("name", ""), "version": outer.project.get("version", ""),
                         "agent_api": 1, "tools": len(outer.tools), "in_process": True,
                         "serving": outer.api is not None, "endpoint": base,
+                        "auth": "token", "token_header": localguard.TOKEN_HEADER,
+                        "token_file": outer.token_file, "denied": outer.denied,
                         "uptime_ms": int((time.time() - outer.started_at) * 1000), "calls": outer.calls}})
                 elif route == "/api/agent/tools":
                     self._send(200, {"ok": True, "data": [_descriptor(tool) for tool in outer.tools]})
@@ -144,15 +193,19 @@ class AgentServer:
                     self._send(200, {"ok": True, "data": {
                         "project": outer.project.get("name", ""), "version": outer.project.get("version", ""),
                         "description": outer.project.get("summary", ""), "base_url": base,
-                        "in_process": True, "tools": [_descriptor(tool) for tool in outer.tools]}})
+                        "in_process": True, "auth": "token", "token_file": outer.token_file,
+                        "tools": [_descriptor(tool) for tool in outer.tools]}})
                 else:
                     self._send(404, {"ok": False, "error": {"code": "not_found", "message": f"未知路径 {route}",
                                                             "endpoints": ["/api/health", "/api/agent/tools",
                                                                           "/api/agent/manifest", "POST /api/agent/tool"]}})
 
             def do_POST(self) -> None:  # noqa: N802
+                if not self._guard():
+                    return
                 route = self.path.split("?")[0].rstrip("/") or "/"
                 if route != "/api/agent/tool":
+                    self._drain()
                     self._send(404, {"ok": False, "error": {"code": "not_found", "message": f"未知路径 {route}"}})
                     return
                 try:
@@ -203,8 +256,15 @@ class AgentServer:
         return self
 
     def _write_endpoint(self, here: Path) -> None:
+        """端点发现文件：内容仍是一行 URL（personal-agent-hub 的脚本按这一行读，别加第二行）。
+
+        令牌**不写在这里**，它只在本机数据目录里（`ra/localguard.token_file()`），
+        因为仓库目录会被同步/打包/顺手 `git add`，而令牌的价值全在「只有本机进程读得到」。
+        """
         try:
-            (here / ".endpoint").write_text(f"http://{self.host}:{self.port}\n", encoding="utf-8")
+            path = localguard.endpoint_file(here / ".endpoint")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"http://{self.host}:{self.port}\n", encoding="utf-8")
         except OSError:
             pass
 
@@ -223,6 +283,9 @@ class AgentServer:
                 "error": self.error, "tools": len(self.tools),
                 "tool_names": [tool["name"] for tool in self.tools],
                 "in_process": self.api is not None, "calls": self.calls,
+                "auth": "本机共享令牌（只监听 127.0.0.1 + Host/Origin 校验 + 非 GET 必带令牌）",
+                "token_header": localguard.TOKEN_HEADER, "token_file": self.token_file,
+                "denied": self.denied, "cors": "无通配 ACAO",
                 "uptime_s": round(time.time() - self.started_at, 1)}
 
 

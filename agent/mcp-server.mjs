@@ -2,15 +2,21 @@
 // MCP (Model Context Protocol) stdio 桥 —— 标准实现，把所有项目的 Agent API 暴露为 MCP tools。
 // 用法：node <project>/agent/mcp-server.mjs
 // 逻辑：读 agent/.endpoint（或 AGENT_BASE_URL）；不通则按 agent/README 里登记的启动命令自动拉起本地服务。
+//
+// 鉴权：服务端现在要求「非 GET 必带本机共享令牌」（见 ra/localguard.py）。令牌由服务自己写进
+// 本机数据目录（Windows: %LOCALAPPDATA%\RecordedAutomation\agent-token），这个桥每次调用现读它，
+// 所以合法的本机 Agent 不需要任何手工步骤 —— 装好就能用，读不到令牌就直接把原因说清楚。
 import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
 import path from 'node:path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const PROTOCOL = '2.2.0';
 const SERVER_INFO = { name: path.basename(PROJECT_ROOT) + '-agent-api', version: '1.0.0' };
+const TOKEN_HEADER = 'x-agent-token';
 
 const log = (...a) => process.stderr.write(`[mcp] ${a.join(' ')}\n`);
 
@@ -19,15 +25,49 @@ function endpointFile() {
   return existsSync(p) ? readFileSync(p, 'utf8').trim() : null;
 }
 
+/** 与 ra/localguard.py 的 default_token_dir() 同一套规则（两种语言各一份，改一处要改两处） */
+function tokenFileCandidates() {
+  const dataDir = process.platform === 'win32'
+    ? process.env.LOCALAPPDATA
+    : (process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'));
+  const base = dataDir ? path.join(dataDir, 'RecordedAutomation', 'agent-token') : null;
+  return [process.env.RA_AGENT_TOKEN_FILE, base].filter(Boolean);
+}
+
+/** 每次调用都现读：服务可能刚刚才起来、令牌文件可能刚刚才写出来 */
+function readToken() {
+  if (process.env.RA_AGENT_TOKEN) return process.env.RA_AGENT_TOKEN.trim();
+  for (const p of tokenFileCandidates()) {
+    try {
+      if (existsSync(p)) {
+        const text = readFileSync(p, 'utf8').trim();
+        if (text) return text;
+      }
+    } catch { /* 读不到就试下一个候选 */ }
+  }
+  return null;
+}
+
 async function rpc(base, method, params) {
+  const isCall = method !== 'tools/list';
+  const headers = { 'content-type': 'application/json' };
+  const token = isCall ? readToken() : null;
+  if (isCall && token) headers[TOKEN_HEADER] = token;
   const res = await fetch(`${base}/api/agent/${method === 'tools/list' ? 'tools' : 'tool'}`, {
     method: method === 'tools/list' ? 'GET' : 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers,
     body: method === 'tools/list' ? undefined : JSON.stringify(params),
     signal: AbortSignal.timeout(120_000),
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok || body.ok === false) throw new Error(body?.error?.message || `HTTP ${res.status}`);
+  if (!res.ok || body.ok === false) {
+    const code = body?.error?.code || '';
+    if (code === 'token_required') {
+      throw new Error(`服务端要求本机令牌，但没读到令牌文件（候选：${tokenFileCandidates().join(' / ') || '无'}）。`
+        + '令牌由录放台启动时写入；确认它在本机运行中，或用 RA_AGENT_TOKEN/RA_AGENT_TOKEN_FILE 指定。');
+    }
+    throw new Error(body?.error?.message || `HTTP ${res.status}`);
+  }
   return body;
 }
 

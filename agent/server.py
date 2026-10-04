@@ -2,6 +2,12 @@
 """Agent API server（标准实现，Python 项目用）。项目只需在同目录提供 tools.py 并导出 TOOLS / PROJECT。
 
 契约见 personal-agent-hub/docs/AGENT_API_STANDARD.md。只用标准库，只监听 127.0.0.1。
+
+⚠ 相对标准模板的有意偏离（本项目验收要求，别在同步模板时改回去）：
+1. 加了 `ra/localguard.py` 的四道闸门（Host 必须是回环名、Origin/Referer 必须匹配本机、
+   所有非 GET 必带本机共享令牌、任何响应都不发通配 CORS）。模板原来发的是
+   `access-control-allow-origin: *`，等于允许用户访问的任意网页驱动本项目全部工具。
+2. 默认端口 8790 → 8795（AGENT_API_STANDARD 给录放台分配的那一个）。
 """
 from __future__ import annotations
 
@@ -20,8 +26,10 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 
 from errors import AgentError  # noqa: E402  与 tools.py 共用同一个类对象
+from ra import localguard      # noqa: E402  与进程内服务（ra/agentapi.py）共用同一份防护判据
 
 START = time.time()
+MAX_BODY = 8 * 1024 * 1024
 
 
 def load_tools() -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -51,44 +59,81 @@ def validate(schema: dict[str, Any] | None, data: Any) -> None:
 def serve(project: dict[str, Any], tools: list[dict[str, Any]], port: int = 8795, host: str = "127.0.0.1") -> None:
     by_name = {t["name"]: t for t in tools}
     descriptor = lambda t: {"name": t["name"], "description": t["description"], "input_schema": t.get("input_schema", {}), "risk": t.get("risk", "read")}
+    token, token_path = localguard.load_token()
+    denied = {"n": 0}
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        server_version = "RecordedAutomation-Agent/1"
 
         def _send(self, status: int, body: dict[str, Any]) -> None:
-            raw = json.dumps(body, ensure_ascii=False, default=str).encode("utf-8")
+            raw = localguard.json_bytes(body)
             self.send_response(status)
             self.send_header("content-type", "application/json; charset=utf-8")
             self.send_header("content-length", str(len(raw)))
-            self.send_header("access-control-allow-origin", "*")
+            # 没有 access-control-allow-origin：这个端点只给本机程序用（与 ra/agentapi.py 一致）
             self.send_header("cache-control", "no-store")
             self.end_headers()
             self.wfile.write(raw)
 
+        def _drain(self) -> None:
+            try:
+                length = int(self.headers.get("content-length") or 0)
+            except ValueError:
+                length = 0
+            if length > 0:
+                try:
+                    self.rfile.read(min(length, MAX_BODY))
+                except OSError:
+                    pass
+
+        def _deny(self, error: localguard.GuardError) -> None:
+            denied["n"] += 1
+            self._drain()
+            self.close_connection = True
+            self._send(error.status, localguard.guard_payload(
+                error, endpoint_hint="本机 Agent 请读 agent/.endpoint 与令牌文件；见 agent/README.md"))
+
+        def _guard(self) -> bool:
+            try:
+                localguard.check_headers(self.headers, bound_port)
+                localguard.check_token(self.command, self.headers, token)
+            except localguard.GuardError as error:
+                self._deny(error)
+                return False
+            return True
+
         def do_OPTIONS(self) -> None:  # noqa: N802
+            self._drain()
             self.send_response(204)
-            self.send_header("access-control-allow-headers", "content-type")
+            self.send_header("content-length", "0")
+            self.send_header("cache-control", "no-store")
             self.end_headers()
 
         def do_GET(self) -> None:  # noqa: N802
+            if not self._guard():
+                return
             route = self.path.split("?")[0].rstrip("/") or "/"
             if route == "/api/health":
-                self._send(200, {"ok": True, "data": {"project": project["name"], "version": project.get("version", "0.0.0"), "agent_api": 1, "tools": len(tools), "uptime_ms": int((time.time() - START) * 1000)}})
+                self._send(200, {"ok": True, "data": {"project": project["name"], "version": project.get("version", "0.0.0"), "agent_api": 1, "tools": len(tools), "auth": "token", "token_header": localguard.TOKEN_HEADER, "token_file": str(token_path), "denied": denied["n"], "uptime_ms": int((time.time() - START) * 1000)}})
             elif route == "/api/agent/tools":
                 self._send(200, {"ok": True, "data": [descriptor(t) for t in tools]})
             elif route == "/api/agent/manifest":
-                self._send(200, {"ok": True, "data": {"project": project["name"], "version": project.get("version", "0.0.0"), "description": project.get("summary", ""), "base_url": f"http://{host}:{self.server.server_address[1]}", "tools": [descriptor(t) for t in tools]}})
+                self._send(200, {"ok": True, "data": {"project": project["name"], "version": project.get("version", "0.0.0"), "description": project.get("summary", ""), "base_url": f"http://{host}:{bound_port}", "auth": "token", "token_file": str(token_path), "tools": [descriptor(t) for t in tools]}})
             else:
                 self._send(404, {"ok": False, "error": {"code": "not_found", "message": f"未知路径 {route}", "endpoints": ["/api/health", "/api/agent/tools", "/api/agent/manifest", "POST /api/agent/tool"]}})
 
         def do_POST(self) -> None:  # noqa: N802
+            if not self._guard():
+                return
             route = self.path.split("?")[0].rstrip("/") or "/"
             if route != "/api/agent/tool":
+                self._drain()
                 self._send(404, {"ok": False, "error": {"code": "not_found", "message": f"未知路径 {route}"}})
                 return
             try:
                 length = int(self.headers.get("content-length") or 0)
-                if length > 8 * 1024 * 1024:
+                if length > MAX_BODY:
                     raise AgentError("too_large", "请求体超过 8MB")
                 body = json.loads(self.rfile.read(length) or b"{}")
                 tool = by_name.get(body.get("tool"))
@@ -121,9 +166,13 @@ def serve(project: dict[str, Any], tools: list[dict[str, Any]], port: int = 8795
             continue
     if bound is None:
         raise SystemExit(f"端口 {port}~{port+11} 全部被占用")
-    (HERE / ".endpoint").write_text(f"http://{host}:{bound}\n", encoding="utf-8")
+    # 闭包里的 bound_port 必须在任何请求进来之前就位（serve_forever 还没启动，这里赋值是安全的）
+    bound_port = bound
+    endpoint = localguard.endpoint_file(HERE / ".endpoint")
+    endpoint.parent.mkdir(parents=True, exist_ok=True)
+    endpoint.write_text(f"http://{host}:{bound}\n", encoding="utf-8")
     # 控制台可能是 GBK，中文会乱码甚至抛 UnicodeEncodeError，因此启动行只用 ASCII。
-    print(f"[agent] {project['name']} v{project.get('version','0.0.0')} -> http://{host}:{bound} ({len(tools)} tools)", flush=True)
+    print(f"[agent] {project['name']} v{project.get('version','0.0.0')} -> http://{host}:{bound} ({len(tools)} tools) auth=token", flush=True)
     httpd.serve_forever()
 
 

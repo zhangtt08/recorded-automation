@@ -288,3 +288,90 @@ app.js 一处引号未转义让整屏界面停在"正在连接后端"；界面�
 （现在测完写回原值；本机被之前几次运行留在 `headless=true`，已改回 `false`，否则录制时看不见页面）；
 窗口形态那一段用固定 sleep 读界面，读到的是上一次切换的状态，整套检查会整体错一格——
 现在改成等到页面自己说出目标形态再断言，并在测量前把形态切回默认（用户可能把窗口留在自由模式）。
+
+## 2026-10-05 验收返工第一轮：Agent 接口从「本机任意进程」收紧成「本机带令牌的进程」
+
+评审给的是 BLOCKER，形状很清楚：**用户访问的任意网页都能驱动全部 25 个工具**。
+`ra/agentapi.py` 与 `agent/server.py` 每个响应都发 `access-control-allow-origin: *`，
+没有 Host / Origin / 令牌校验，服务还默认开着（`store.py` 的 `"agent_api": True`、`main.py` 起它）。
+最要命的是 `ra.record_start`（任意 URL）+ `ra.draft` 这一对 —— 对着那份装有真实登录态的
+受控档案敲键盘；`ra.set_secret` / `ra.run_workflow` / `ra.delete_workflow` 同理。
+唯一的"闸门" `_require_confirm` 只看请求体里的 `"confirm": true`，而那个值由发起请求的人写。
+
+### 判据只写一份：`ra/localguard.py`
+
+两个入口必须过同一道门，否则攻击者挑没设防的那一个就行，所以判据收在新模块里，
+`ra/agentapi.py` 与 `agent/server.py` 都 import 它（`server.py` 从此不再是"与模板逐字相同"的复制件，
+文件头写明了偏离的两条，别在同步模板时改回去）：
+
+| 闸门 | 判据 | 拒绝时 |
+| --- | --- | --- |
+| 绑定 | 只 bind `127.0.0.1`（原来就是） | — |
+| `Host` | `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>`，端口带了必须等于自己这一台 | 403 `host_not_allowed` |
+| `Origin` / `Referer` | 不发 = 非浏览器客户端，放行；发了必须是回环 http(s) 源 | 403 `origin_not_allowed` |
+| 令牌 | 所有非 GET 必带 `x-agent-token`（`authorization: bearer` 也收），`hmac.compare_digest` | 401 `token_required` |
+| CORS | 任何响应都不发 `access-control-allow-origin`；`OPTIONS` 不给 ACAO / allow-methods / allow-headers | 网页卡在预检 |
+
+**`Origin` 只与回环清单这个常量比，绝不与本次请求的 `Host` 比。** 评审点名的 DNS rebinding 就是这个形状：
+攻击者把域名解析到 127.0.0.1 之后，浏览器发来的 `Host` 与 `Origin` 恰好都是那个域名，
+"两者一致就放行"等于把门开着。回归 `test_dns_rebinding_shape_is_refused_even_when_origin_matches_host`
+先断言这两个值确实相等，再断言服务拒绝 —— 谁将来"顺手加个 Origin==Host 的校验"都会红在这一条上。
+
+### 令牌存哪、为什么不是别的地方
+
+`localguard.load_token()`：文件已有且形状对就用，否则生成 32 字节随机值原子落盘（`os.open(..., 0o600)`）。
+默认位置 `%LOCALAPPDATA%\RecordedAutomation\agent-token`（非 Windows 走 `$XDG_DATA_HOME`）。
+两个入口读同一个文件，所以"录放台开着 + 又单独起 `agent/server.py`"是同一把令牌，不需要谁通知谁。
+
+- **不放仓库里**（`agent/.endpoint` 旁边那种做法）：仓库会被同步、被打包进 exe、被 `git add -A`，
+  而这个文件的全部价值就是"只有本机进程读得到"。评审给的另一个例子（`%LOCALAPPDATA%`）才是对的。
+- **`agent/.endpoint` 保持一行 URL**：personal-agent-hub 的 `register-agent-apis.mjs` 把整个文件 trim
+  之后当 URL 用，加第二行就把它读坏了。`/api/health` 只报 `token_file` 这个**路径**，不报值。
+- Windows 上这份"限制"来自 %LOCALAPPDATA% 的目录 ACL（当前用户 + 管理员组），不是 `chmod`
+  （NTFS 上 `chmod` 只动只读位）。这条如实写进模块 docstring，不夸大成"加密"。
+- 出口：`RA_AGENT_TOKEN_FILE` 换位置、`RA_AGENT_TOKEN` 直接给定，测试与编排器用；正常运行不需要。
+
+### 合法路径不许多一步
+
+`agent/mcp-server.mjs` 每次调用现读令牌文件（`tools/call` 带、`tools/list` 是 GET 不带），
+读不到就把候选路径与出路写进错误里。桌面程序的界面也照同一口径改了：
+「Agent 接口」那一屏多一格"鉴权"（显示令牌文件位置 + 已拦下多少次外部调用），
+可复制的 curl 片段按 `$LOCALAPPDATA/.../agent-token` 现读、绝不把令牌原文写进界面或剪贴板，
+而 `自检一次调用` 现在带令牌 —— 它证明的是"合法本机路径走得通"，不再只是"端口开着"。
+
+`confirm:true` 保留，但按标准的口径说清楚它的身份：那是给 Agent 的**二次确认（防手滑）**，
+不是安全边界；顺序是 Host → Origin → 令牌 → schema → confirm。README 与 `agent/README.md` 都改了这句。
+
+### 本轮实测数字
+
+| 层次 | 命令 | 结果 |
+| --- | --- | --- |
+| 单元 + 契约 + 防护闸门 | `python -m unittest discover -s tests -t .` | 见文末汇总 |
+| 防护闸门单跑 | `python -m unittest tests.test_agent_guard` | **23 项全部通过** |
+| 红→绿对照（评审要求的"退回修复前"实验） | `git checkout HEAD -- ra/agentapi.py agent/server.py` 后重跑那一组 | **23 项红 15 项**（11 FAIL + 4 ERROR），下面逐条列 |
+| 整链自检 | `python -m ra.main --selfcheck` | 见文末汇总 |
+
+退回去之后每一条是怎么红的（不是推理，是把服务起起来真打的）：
+
+- `test_spoofed_host_is_refused` → `AssertionError: 200 != 403 : 伪造 Host evil.test 居然过了`
+- `test_rebinding_pair_of_host_and_origin_is_refused` → `200 != 403`
+- `test_cross_origin_post_is_refused` / `test_cross_origin_get_is_refused_too` → `200 != 403 : http://evil.test 的跨源 POST 居然过了`
+- `test_post_without_token_is_refused` / `test_post_with_wrong_token_is_refused_the_same_way` → `200 != 401`
+- `test_every_registered_write_tool_is_unreachable_without_a_token` → `(400, 'bad_input') != (401, 'token_required')`
+  —— 这一条最能说明问题：没带令牌的请求**已经打到工具层**了，只差参数不对。
+  （`input` 刻意传空对象：万一防护不在，`ra.record_start` 也不会真的开一个浏览器去录陌生 URL，
+  这台机器上那会抢前台。带修复的版本回 401，证明闸门排在参数校验之前。）
+- `test_no_wildcard_acao_on_mutating_routes` → 响应头里当场抓到 `'access-control-allow-origin': '*'`
+- `test_browser_preflight_cannot_open_the_door` → 预检回的是 `access-control-allow-headers: content-type`
+- `test_standalone_*` 三条 → 独立进程同样 `200 != 403 / 401`，证明 `agent/server.py` 那半个洞原来也开着
+- `test_denied_requests_are_counted_...` / `test_legit_get_needs_no_token` → `AttributeError: denied`、
+  `KeyError: 'auth'`（那一版根本不记账、也不宣告自己的鉴权方式）
+- `test_endpoint_file_stays_a_single_url_line` → 令牌文件不存在（那一版不写它）
+
+跑法上的两个坑，下一个人别再踩：
+
+1. 服务只在临时目录里跑：`LOCALAPPDATA`、`RA_AGENT_TOKEN_FILE`、`RA_AGENT_ENDPOINT_FILE` 全部指到 tempdir。
+   上面那次"退回修复前"的实验把仓库里的 `agent/.endpoint` 覆盖成了测试端口（旧版不认这个 env），
+   已改回 `http://127.0.0.1:8795`。**新代码认这个 env，所以测试不会再碰仓库里那一份。**
+2. 断言一律写成 `body.get("error", {}).get("code")` 而不是 `body["error"]["code"]`：
+   防护不在时响应是 200 + data，直接下标会让测试在夹具里炸掉，评审要的"每条都能红"就变成"整组 ERROR"。

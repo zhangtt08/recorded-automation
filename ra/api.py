@@ -505,10 +505,16 @@ class Api:
                 "params": sorted((tool.get("input_schema") or {}).get("properties", {})),
             } for tool in server.tools]
             base = info.get("url") or ""
+            # 令牌原文绝不写进界面与剪贴板：片段里按路径现读，抄过去就能用。
+            token_path = str(info.get("token_file") or "").replace("\\", "/")
             info["curl"] = (f"curl -s {base}/api/agent/tools\n"
+                            f'TOKEN="{token_path}"\n'
                             f"curl -s -X POST {base}/api/agent/tool "
                             f"-H 'content-type: application/json' "
+                            f'-H "x-agent-token: $(cat "$TOKEN")" '
                             f"-d '{{\"tool\":\"ra.status\",\"input\":{{}}}}'")
+            info["token_note"] = ("所有写操作都要带本机共享令牌。MCP 桥（agent/mcp-server.mjs）会自动读上面那个"
+                                  "文件，合法的本机 Agent 不需要手工传；只有 curl / PowerShell 手动调用才要自己带上。")
             root = str(resource_root().parent)
             info["mcp"] = json.dumps({"mcpServers": {"recorded-automation": {
                 "command": "node",
@@ -526,9 +532,12 @@ class Api:
             import urllib.request
 
             url = f"http://127.0.0.1:{server.port}/api/agent/tool"
+            headers = {"content-type": "application/json"}
+            if server.token:
+                headers["x-agent-token"] = server.token      # 自测也要过同一道闸门，否则它证明不了什么
             request = urllib.request.Request(
                 url, data=json.dumps({"tool": "ra.status", "input": {}}).encode("utf-8"),
-                headers={"content-type": "application/json"}, method="POST")
+                headers=headers, method="POST")
             with urllib.request.urlopen(request, timeout=20) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             return {"ok": bool(payload.get("ok")), "http": response.status,

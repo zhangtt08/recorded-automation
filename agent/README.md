@@ -3,6 +3,46 @@
 把录放台当成一个带 schema 的工具对外暴露：本地 HTTP 服务 + MCP stdio 桥。
 契约见 `personal-agent-hub/docs/AGENT_API_STANDARD.md`。**只监听 127.0.0.1**，只用标准库 + 项目已有依赖。
 
+## 谁能调：本机令牌（2026-10-05 补，评审 BLOCKER #1）
+
+以前这两个入口对任何网页敞开：响应统一发 `access-control-allow-origin: *`，没有 Host / Origin / 令牌校验，
+于是**用户访问的任意网页**都能驱动全部 25 个工具（`ra.record_start` 指任意 URL + `ra.draft` 对着装有真实
+登录态的档案敲键）。现在闸门统一写在 `ra/localguard.py`，进程内服务与 `agent/server.py` 共用同一份判据：
+
+| 闸门 | 判据 | 不过的话 |
+| --- | --- | --- |
+| 绑定 | 只 bind `127.0.0.1` | — |
+| `Host` | 必须是 `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>`（带了端口就要对得上） | 403 `host_not_allowed` |
+| `Origin` / `Referer` | 缺省放行（curl / node 不发）；带了就必须是回环 http(s) 源 | 403 `origin_not_allowed` |
+| 令牌 | **所有非 GET** 必带 `x-agent-token`（也收 `authorization: bearer`），定时安全比较 | 401 `token_required` |
+| CORS | 任何响应都不发 `access-control-allow-origin`；`OPTIONS` 预检也不给 ACAO/allow-methods/allow-headers | 浏览器页面在预检阶段就被拦下 |
+
+⚠ `Origin` 只与「回环地址清单」这个常量比，**绝不与本次请求的 `Host` 比** —— DNS rebinding 时两者恰好相等，
+比了等于没防。`tests/test_agent_guard.py::test_dns_rebinding_shape_is_refused_even_when_origin_matches_host`
+钉的就是这一点。
+
+- 令牌在服务启动时准备（`localguard.load_token()`）：已有就用已有的，没有就生成 32 字节随机值再落盘。
+  两个入口读同一个文件，所以「录放台开着 + 又单独起一个 `agent/server.py`」是同一把令牌。
+- 令牌文件默认 `%LOCALAPPDATA%\RecordedAutomation\agent-token`（非 Windows 走 `$XDG_DATA_HOME`）。
+  **刻意不放在仓库里**：仓库会被同步、被打包、被 `git add -A`，而这个文件的全部价值就是「只有本机进程读得到」。
+  Windows 上的边界来自 %LOCALAPPDATA% 的目录 ACL（当前用户 + 管理员组）；POSIX 上另外 `chmod 600`。
+- `agent/.endpoint` 仍然只有**一行 URL**（personal-agent-hub 的脚本把整文件 trim 当 URL 读，别加第二行）。
+  令牌不写在那里，也不从 `/api/health` 返回 —— 健康检查只报 `token_file` 这个**路径**。
+- 想换位置：`RA_AGENT_TOKEN_FILE=<路径>`；想直接给定：`RA_AGENT_TOKEN=<值>`。两个都是给测试与编排器留的口。
+
+**合法的本机 Agent 不需要任何手工步骤**：`agent/mcp-server.mjs` 每次调用现读那个文件（只有 `tools/call`
+需要，`tools/list` 是 GET），读不到时把候选路径与出路一起写进错误。界面「Agent 接口」那一屏显示令牌文件
+位置与被拦下的调用次数；`自检一次调用` 走同一道闸门（不带令牌就自检不过，这样它才证明得了事）。
+
+手动调用写操作要自己带令牌（Git Bash 写法，抄过去就能用）：
+
+```bash
+TOKEN="$(cat "$LOCALAPPDATA/RecordedAutomation/agent-token")"
+curl -s -X POST http://127.0.0.1:8795/api/agent/tool \
+  -H 'content-type: application/json' -H "x-agent-token: $TOKEN" \
+  -d '{"tool":"ra.status","input":{}}'
+```
+
 ## 两种跑法，同一份工具表
 
 ```bash
@@ -21,13 +61,15 @@ AGENT_PORT=9100 python agent/server.py # 换端口
 - 端口被占用时自动 +1，并把实际地址写进 `agent/.endpoint`（MCP 桥优先读它）。
 - 服务没起来时，MCP 桥按 `agent/launch.json` 依次尝试拉起：先 `python agent/server.py`，
   再 `录放台.exe`；都失败会把每种方式的原因写在错误里，并提示"直接打开录放台也行"。
-- `server.py`、`errors.py` 是标准模板的复制件（`server.py` 与模板唯一的差别是默认端口 8790 → 8795）。
+- `server.py`、`errors.py` 是标准模板的复制件。`server.py` **有意偏离模板两处**（文件头写清了）：
+  默认端口 8790 → 8795，以及上面那套 `ra/localguard.py` 闸门。同步模板时别把它改回去。
 
 ## HTTP 端点
 
 ```
-GET  /api/health          项目名、版本、agent_api、工具数、uptime、是否进程内服务、已被调用次数
-GET  /api/agent/manifest  项目信息 + 全部工具描述 + base_url
+GET  /api/health          项目名、版本、agent_api、工具数、uptime、是否进程内服务、已被调用次数，
+                          外加 auth / token_header / token_file / denied（只报令牌文件的路径，绝不报令牌值）
+GET  /api/agent/manifest  项目信息 + 全部工具描述 + base_url + auth
 GET  /api/agent/tools     工具清单（name / description / input_schema / risk）
 POST /api/agent/tool      {"tool":"ra.xxx","input":{...}} → {ok:true,data:...,tool,ms}
 ```
@@ -41,6 +83,11 @@ POST /api/agent/tool      {"tool":"ra.xxx","input":{...}} → {ok:true,data:...,
 
 `risk` 三档：**read** 只读；**write** 会写本机文件；**exec** 会真的开浏览器操作页面。
 write / exec 一律要在 `input` 里显式传 `confirm:true`，缺了直接返回 `bad_input`。
+
+⚠ `confirm` 是**给 Agent 的二次确认**（防手滑），**不是安全边界**：它就在请求体里，任何能发出这个请求的人
+都能自己写 `true`。真正决定「谁能发出这个请求」的是上面那一节的本机令牌 —— 评审原话「唯一的闸门就是
+`confirm:true`，而这个值是跨源攻击者可控的」，补的就是这一层。两道都在，顺序是：Host → Origin → 令牌 →
+schema 校验 → confirm。
 
 | 工具 | risk | 需要什么 | 返回什么 | 真实落点 |
 | --- | --- | --- | --- | --- |
@@ -89,10 +136,16 @@ write / exec 一律要在 `input` 里显式传 `confirm:true`，缺了直接返�
 ## 自检
 
 ```bash
-python -m unittest discover -s tests -t .      # 后端、契约与界面脚本语法门
+python -m unittest discover -s tests -t .      # 后端、契约、防护闸门与界面脚本语法门
 python -m ra.main --selfcheck                  # 录制→审阅→校验→回放整链（真实浏览器 + 本机站点）
 python -m ra.main --verify                     # 窗口内界面自检（含 Agent 屏与窗口形态）
+python tools/verify.py                         # 一条命令的门禁：上面第一条 + --selfcheck + 仓库卫生 + 端点契约
 ```
 
+`tests/test_agent_guard.py` 用真实 HTTP 请求打这两个服务（独立那一个真起子进程），逐条验：
+伪造 `Host` 拒、`Origin: http://evil.test` 的跨源 POST 拒、没带令牌拒、从令牌文件取值的合法本机调用成功、
+`OPTIONS` 预检与所有 mutating 响应都不带 `access-control-allow-origin`。
+
 界面里点「Agent 接口 → 自检一次调用」会真的对本进程发一次 HTTP 调用，把 HTTP 状态、耗时与
-数出来的工作流条数显示出来 —— 而不是只报告"服务应该已经起来了"。
+数出来的工作流条数显示出来 —— 而不是只报告"服务应该已经起来了"。它带的是同一个令牌，所以这道自检
+证明的是「合法本机路径确实走得通」，而不只是端口开着。

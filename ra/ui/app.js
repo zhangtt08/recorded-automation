@@ -1210,6 +1210,8 @@
     $("agent-stats").innerHTML = [
       ["服务状态", info.ok ? "正在运行" : "未运行", info.ok ? "与界面同一个进程，Agent 做的每一步这里都看得见" : (info.error || "")],
       ["端点", info.ok ? info.url.replace(/^http:\/\//, "") : "—", "只监听 127.0.0.1，端口被占自动 +1"],
+      ["鉴权", info.ok ? "本机令牌" : "—", info.ok
+        ? ("非 GET 必带 x-agent-token · 已拦下 " + (info.denied || 0) + " 次外部调用") : ""],
       ["工具数", (info.tool_docs || []).length + " 个", "read " + countRisk(info, "read") + " · write " + countRisk(info, "write") + " · exec " + countRisk(info, "exec")],
       ["已被调用", info.ok ? String(info.calls || 0) + " 次" : "—", "从界面起到现在，Agent 发起的调用次数"]
     ].map((row) => '<div class="card stat"><p class="k">' + esc(row[0]) + '</p><p class="v">' + esc(String(row[1]))
@@ -1223,6 +1225,9 @@
       + '<span class="mut">GET /api/health · GET /api/agent/tools · POST /api/agent/tool</span></div>'
       + '<p class="composer-hint">MCP 客户端用 <span class="k mono">node agent/mcp-server.mjs</span>；'
       + '它会在服务没起来时按 <span class="k mono">agent/launch.json</span> 自己拉起。</p>'
+      + '<p class="composer-hint">写操作要带本机令牌 <span class="k mono">x-agent-token</span>，'
+      + '令牌文件：<span class="k mono">' + esc(info.token_file || "—") + '</span>。'
+      + 'MCP 桥自动读它，不用手工传；网页一律调不动（没有通配 CORS，Host/Origin 也过不了）。</p>'
       : '<div class="card-t">端点与自检</div><p class="s bad">' + esc(info.error || "Agent 接口没有运行") + '</p>'
       + '<p class="composer-hint">这个开关在设置页；打开后重启程序即可让 Agent 直接调用本机工作流库。</p>';
 
