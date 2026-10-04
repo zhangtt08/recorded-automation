@@ -13,10 +13,15 @@
 | ra.run_history | ra.journal.FileJournal + ra.api.Api.run_detail（真实步骤时间线） |
 | ra.list_secret_refs | ra.secrets.FileSecretStore.preview()（只有引用名与长度） |
 
-安全边界：
+安全边界（与 personal-agent-hub/docs/AGENT_API_STANDARD.md 第 4 条同一条判据）：
 1. 秘密值永不返回，只返回引用名、长度与「缺哪些」。
-2. 删除类动作（删工作流、删秘密值、清空浏览器登录态）不暴露为工具。
-3. 写入与执行必须显式 confirm:true；缺 confirm 直接返回 bad_input。
+2. 删工作流与删秘密引用都开放给 Agent，但都要显式 confirm:true；
+   清空浏览器登录态仍然只在界面里做（那是带确认框的人工动作）。
+3. confirm 的判据按风险档走，不看意图：`exec`（真的跑活、真的写盘、真的起进程）必须有、缺省拒绝；
+   `write` 只有名字或描述含破坏性动词（删除 / 清空 / 覆盖 / 重置）时才强制；
+   对自己那一场录制的可逆收尾（`ra.record_stop`：不写盘、不起进程、不驱动页面）不强制 ——
+   标准点名的真退化恰恰是「把 confirm 塞给每一个写入」，那只会把调用方训练成无脑传 true。
+   这条判据由 tests/test_agent_api.py 逐条扫全表，红在这里，而不是等作品集的验收器报出来。
 4. 结果分类沿用 ra/core.py 的 completed / completed_unverified / failed / uncertain / cancelled，
    程序不自动重试，工具也不重跑。
 """
@@ -809,8 +814,11 @@ NEW_TOOLS = [
          "url": {"type": "string", "description": "要录制的页面地址"},
          "confirm": {"type": "boolean", "description": "必须为 true"}},
          "required": ["url", "confirm"], "additionalProperties": False}},
-    {"name": "ra.record_stop", "risk": "exec", "handler": _record_stop,
-     "description": "结束录制并把整理好的草稿返回（步骤、丢弃计数、问题列表）。",
+    {"name": "ra.record_stop", "risk": "write", "handler": _record_stop,
+     "description": "结束自己这一场录制，并把整理好的草稿原样返回（步数、丢弃计数、问题列表）。"
+                    "这是对自己那场录制的可逆收尾：不写本机文件、不起进程、也不驱动页面，"
+                    "所以按标准的 write 档处理、不要求 confirm（把 confirm 塞给每一个写入才是真的退化）。"
+                    "要 confirm 的是开始录制（ra.record_start，它真的开浏览器）与把草稿存为工作流（ra.save_draft）。",
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "ra.draft", "risk": "read", "handler": _draft,
      "description": "读当前草稿：每步的编号、id、动作、目标定位器与匹配情况、还缺什么。不写盘。",

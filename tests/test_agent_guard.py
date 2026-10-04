@@ -14,6 +14,8 @@ Host / Origin / 令牌校验，`agent/server.py` 同形。于是**用户访问�
 4. 合法的本机路径（回环 Host + 从令牌文件读出来的令牌）真的能调成功。
 5. 浏览器过不了预检：`OPTIONS` 与所有 mutating 响应都不带 `access-control-allow-origin`。
 6. 独立进程 `agent/server.py` 走的是同一套闸门（真起子进程实测，不是读代码）。
+7. 公示清单（作品集验收器读的那一份 `/api/agent/tools`）按标准第 4 条自查一遍：风险档合法，
+   被要求 confirm 的工具必须把 confirm 同时放在 properties 与 required 里（缺省不拒绝等于没有闸门）。
 
 服务只在临时数据目录里跑（`RA_AGENT_TOKEN_FILE` / `RA_AGENT_ENDPOINT_FILE` / `LOCALAPPDATA` 全部指到
 tempdir），不碰本机真实的 %LOCALAPPDATA%\\RecordedAutomation，也不启动任何浏览器。
@@ -301,6 +303,45 @@ class InProcessApiGuardTests(unittest.TestCase):
         raw = Path(os.environ[localguard.ENDPOINT_FILE_ENV]).read_text(encoding="utf-8")
         self.assertEqual(raw.strip(), f"http://{LOOP}:{self.port}")
         self.assertNotIn(self.token, raw)
+
+    # -- 6. 公示的风险档与 confirm（作品集验收器读的就是这份清单） -------------
+    def test_the_published_manifest_satisfies_standard_rule4(self):
+        """作品集验收器打的是 GET /api/agent/tools 这一份，不是源码里的那张表。
+
+        所以 AGENT_API_STANDARD 第 4 条的判据（exec 必须有 confirm 且缺省拒绝；write 只在名字或
+        描述含破坏性动词时强制）就在这条真实 HTTP 返回上跑一遍：红要红在本仓库。
+        本轮的由来正是这里 —— `ra.record_stop` 公示的是 exec，可它既不写盘、不起进程也不驱动页面，
+        只是把自己那一场录制收尾并把草稿原样交回来，于是验收器点名「exec 工具没有 confirm 入参」。
+        改的是这一边的标签（exec → write），不是判据，也不是给不需要的地方补一个 confirm。
+        """
+        import re
+        destructive = re.compile(
+            r"\b(delete|remove|purge|clear|reset|overwrite|drop|unlink|erase)\b|删除|清空|覆盖|重置", re.I)
+        status, _h, listed = request(self.port, "/api/agent/tools")
+        self.assertEqual(status, 200)
+        rows = listed["data"]
+        self.assertEqual({row["name"] for row in rows}, {tool["name"] for tool in self.server.tools},
+                         "公示的工具名与注册表不一致")
+        by_name = {row["name"]: row for row in rows}
+        self.assertEqual(by_name["ra.record_stop"]["risk"], "write",
+                         "风险档又回到 exec：按标准那就必须有 confirm，本轮的结论被推翻")
+        self.assertNotIn("confirm", by_name["ra.record_stop"]["input_schema"].get("properties") or {},
+                         "给可逆小写入挂 confirm，是把调用方训练成无脑传 true 的起点")
+        offenders = []
+        for row in rows:
+            self.assertIn(row.get("risk"), {"read", "write", "exec"}, f"{row['name']} 的 risk 不合法")
+            properties = (row.get("input_schema") or {}).get("properties") or {}
+            required = (row.get("input_schema") or {}).get("required") or []
+            demanded = (row["risk"] == "exec"
+                        or (row["risk"] == "write"
+                            and bool(destructive.search(f"{row['name']} {row.get('description', '')}"))))
+            if demanded and ("confirm" not in properties or "confirm" not in required):
+                offenders.append(f"{row['name']}（{row['risk']}）")
+        self.assertEqual(offenders, [], f"验收器会点名的工具：{offenders}")
+        # 另一个出口必须给出同一份风险档，否则就是第二份会各自漂移的判据
+        status, _h, manifest = request(self.port, "/api/agent/manifest")
+        self.assertEqual({row["name"]: row["risk"] for row in manifest["data"]["tools"]},
+                         {row["name"]: row["risk"] for row in rows})
 
 
 class StandaloneServerGuardTests(unittest.TestCase):

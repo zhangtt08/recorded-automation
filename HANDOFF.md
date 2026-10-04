@@ -174,6 +174,12 @@ Agent 接口成为程序自身的一部分、以及把上一轮遗留的静默�
 删除与写秘密值都开放给 Agent，但**每一个 write/exec 都必须显式 `confirm:true`**，
 秘密值仍然**只进不出**（返回里只有引用名与长度）。清空浏览器登录态仍然只在界面里做。
 
+> ⚠ 这一段里「每一个 write/exec 都必须 confirm」那句已被 2026-10-05 第二轮收窄，判据照
+> `AGENT_API_STANDARD.md` 第 4 条：exec 必须有且缺省拒绝，write 只在含破坏性动词时强制。
+> 正是这句过宽的自我规定把 `ra.record_stop` 标成了 exec，而它什么都不写、什么都不起、
+> 什么都不驱动 —— 见本文最后一节 §3。留在原文里是因为这段讲的是当时那一轮的取舍，
+> 但判据以最后一节为准。
+
 界面里新增「Agent 接口」一屏（`Alt+4`）：端点、25 个工具的名字/风险档/干什么、必填参数、
 可直接复制的 curl 与 MCP 配置片段，以及一个「自检一次调用」按钮 —— 它真的对自己发一次 HTTP 请求，
 把 HTTP 状态、耗时和数出来的工作流条数显示出来，而不是报告"服务应该起来了"。
@@ -423,3 +429,112 @@ app.js 一处引号未转义让整屏界面停在"正在连接后端"；界面�
 2. 工具侧的 `_journal()` 读 `data_root()/journal.jsonl`，界面侧的 `build(root)` 用传进去的 root。
    测试要同时钉住 `LOCALAPPDATA` 与 `build(<LOCALAPPDATA>/RecordedAutomation)`，
    否则两边读的是不同文件，第 4 条出口断言会假绿。
+
+## 2026-10-05 返工第二轮：跑红的单测、从未跑过的边界测试、`ra.record_stop` 的风险档
+
+接手时实测：`python -m unittest discover -s tests -t .` 退出 1，149 条里 **4 errors + 1 failure**，
+全部落在未跟踪的 `tests/test_replay_boundary.py` 上；`--selfcheck` 通过；工作树除两个未跟踪项外干净
+（另有 `agent/README.md` 一处改动漏在树外，见 §0）。
+
+### 0. 开工前清场（`ec6180c`）
+
+- `.ra-tmp/` **从来没被忽略**：`git status` 把它列为未跟踪目录，里面是排查浏览器问题留下的 Chromium
+  档案，含这个账号真实的 `Default/Network/Cookies` 与 `Login Data`。任何人一次 `git add -A` 就会把
+  凭据提交进仓库。现在补 `/.ra-tmp/`（根锚定，理由同 multi-agent-orchestrator 那条「裸目录名会放过
+  子目录」的教训），目录留在磁盘上不进版本库，`git check-ignore` 实测命中。
+- `agent/README.md` 那段「运行日志有上界」是上一轮（`17f1073`）的文档半边，没跟着提交。逐条对着源码
+  核过才收下（`MAX_BYTES=2_000_000`、`KEEP=2`、最旧一份真 `unlink()`）。改了一句口径：原文写
+  「`ra.status` 与 `ra.run_history` 的返回里带 `journal`」，实际 `ra.run_history` 的**列表**分支只在
+  轮转过（`trimmed=true`）时才附，查不到的 `run_id` 走的是错误信息那句。
+
+### 1. 那个 TypeError 的来路（`91110e9`）
+
+`Runner.__init__` 要四个必需协作者 `driver / secrets / journal / stop`，**这份签名从初始提交 433424b
+就存在**，唯一的真实装配点 `ra/session.py:447` 一直按位置传对了。所以「防护那一轮给 Runner 加了
+stop、调用点没跟上」这个印象不成立：漏的是那份**从未提交、也从未跑过**的测试助手 ——
+它写的是 `Runner(driver, journal=None, secrets=lambda ref: "")`。
+
+补上 `stop` 也只是第一步。那份替身只有 `open/click/fill/hotkey/present`，**没有 `act`**；
+`journal=None` 而 Runner 调 `journal.append`；`secrets` 是 lambda 而 Runner 调 `secrets.get`。
+替身不像真类时，被测对象半路退化成 AttributeError，绿了也不证明 Runner 是对的 —— 本项目已经记过
+这条教训，这次把它写成断言：
+
+- `tests/test_replay_boundary.py::test_the_doubles_are_shaped_like_the_real_contracts`：
+  逐个比对 `ra.core.Driver / SecretStore / Journal` 的协议成员与替身的方法，缺一个就报「缺 ['act']」。
+- `tests/test_core.py::ContractTests::test_every_runner_construction_site_binds_the_real_signature`：
+  用 `ast` 扫 `ra/` 与 `tests/` 里每一个 `Runner(...)` 构造点，按 `inspect.signature` 真 bind 一遍，
+  并要求扫到 `session.py` 那一条（否则这条检查自己就失效了）。必需参数还钉成
+  `["driver", "secrets", "journal", "stop"]`。
+- 测的东西换成真对象：日志用 `ra.journal.FileJournal`（真落盘再读回来查），秘密库用仓库自带、
+  此前没有任何测试用过的 `ra.secrets.StaticSecrets`，停止位用真 `threading.Event()`。
+
+变异实测（每条改完即还原，工作树回到只有测试文件被改）：
+
+| 变异 | 变红的断言 |
+| --- | --- |
+| 删掉 `core.py` 里动作之前那次 `self._guard(origin)` | `test_in_scope_is_reevaluated_before_every_action`（调用序列当场对不上） |
+| 把 `session.py:447` 改成 `Runner(driver, self.secrets, journal, poll_s=0.05)` | `session.py:447 构造 Runner 的方式不合真实签名：missing a required argument: 'stop'` |
+| 从替身里删掉 `act` | 形状那条报 `RecordingDriver 不像 Driver：缺 ['act']`，另三条同时红 |
+| 摘掉 `Workflow.__post_init__` 的 `start_url ∈ origin` 判定 | 本文件 4 条 + `test_core.py` 1 条 |
+
+### 2. 评审点名的两条 GOOD 钉成真会红的测试（`8899116`）
+
+`tests/test_replay_boundary.py` 里「只跑固定 JS 片段」那条以前断言的是仓库里根本不存在的符号
+`JS_SNIPPETS`（永远红，且红得没有意义）。现在按 `ast` 查 `ra/core.py`、`ra/driver.py`、`ra/session.py`、
+`ra/recorder.py` 里每一个 `evaluate` / `add_init_script` 的脚本实参：只能是仓库里的字符串字面量，
+或 recorder 那份从 `resource_root()/ui/record_script.js` 读进来的分发脚本；顺带钉住装配处接的就是
+那个路径。注入一句 `locator.evaluate(f"document.querySelector('{selector}')")` → 该条当场报
+`ra/driver.py:164 递给页面的脚本不是固定片段`。
+
+同源那两条补到评审要的覆盖面：
+`test_the_agent_surface_refuses_the_same_workflow` 走 `agent/tools.py` 那份真工具表（`LOCALAPPDATA`
+临时指到空目录），`ra.validate_workflow` 列阻塞项、`ra.save_workflow` 带 `confirm:true` 仍被拒且回读
+磁盘确认没写进去、手放一份越界定义后 `ra.run_workflow` 报 `run_refused` 并在开浏览器之前就被拦下，
+外加对照组（只差 `start_url` 同源）必须写得进去 —— 否则前面三条只是「什么都拒」。
+`test_the_real_adapter_reads_the_live_url_on_every_check` 测的是真 `ra.driver.PlaywrightDriver`：
+把 `in_scope` 改成「缓存第一次结论」立刻变红。`test_the_completion_condition_lookup_is_gated_too`
+把整条调用序列逐个钉住（含完成条件那次定位与等待步不发动作）。
+
+### 3. `ra.record_stop`：改这一边的标签，不改判据（本轮）
+
+验收器原话：`exec/破坏性 write 工具没有 confirm 入参：ra.record_stop`。读 `AGENT_API_STANDARD.md`
+第 4 条之后选的是**（b）本仓库的风险档写错了**，理由是对着代码量的，不是对着印象：
+
+- `_record_stop` → `Api.stop_recording` → `Session.stop_recording` 这条路只做四件事：
+  状态不是 `recording` 就如实拒绝；置一个停止标志并 join 那个 drain 线程；在浏览器线程上
+  `recorder.drain()`（只消费内存队列）+ `detach()`（摘掉一个页面事件监听，注入脚本按注释刻意留在页面）；
+  把状态改成 `review`/`idle` 并把草稿**原样返回**。
+- 按标准第 4 条对 `exec` 的定义 —— 真的跑活、真的写盘、真的起进程 —— 它**三样都不做**：
+  `Session.stop_recording` 里没有一个 `open(..., "w")`（本轮加了 `test_stop_recording_touches_no_disk_and_opens_no_browser`，
+  前后各数一遍目录，含 size 与 mtime_ns），没有起进程（受控浏览器是 `ra.record_start` 开的，那一步要
+  `confirm`），也没驱动页面。它是对**自己那一场**录制的可逆收尾，最坏结果只是「后半段没录上，
+  重录一次即可」，已捕获的候选事件全部交回调用方，不销毁任何东西。
+- 反过来，给它补一个 `confirm` 才是标准点名的那种退化：规则 4 明写「可逆小写入不强制，硬要 confirm
+  只会让调用方一律传 true」。同理也不会为了哄验收器绿而只加一个可选的 `confirm` 键 —— 那按标准是
+  「缺省不拒绝」，等于闸门形同没有，而且这条判据现在被 `test_confirm_demanded_exactly_where_rule4_says`
+  和 `test_the_published_manifest_satisfies_standard_rule4` 同时挡着（要求 confirm 的工具必须把它同时放进
+  `properties` 与 `required`）。
+
+落地：`agent/tools.py` 里 `ra.record_stop` 的 `risk` 由 `exec` 改成 `write`，描述写清为什么；
+`README.md` / `agent/README.md` 的三档定义与「write/exec 一律 confirm」那句一并收窄成标准原判据
+（顺带修掉 `agent/tools.py` 顶部那条已经过时的「删除类动作不暴露为工具」—— 表里第三行就有
+`ra.delete_workflow`）；`tests/test_agent_api.py` 补三条、`tests/test_agent_guard.py` 补一条在**公示清单**
+（验收器实际读的那份 HTTP 返回）上跑的复查。
+
+反向验证：把 `risk` 改回 `exec` → `test_risk_labels_are_honest`、
+`test_confirm_demanded_exactly_where_rule4_says`、`test_the_published_manifest_satisfies_standard_rule4`
+三条同时红，第三条的措辞就是验收器那句「exec 工具没有 confirm 入参」。
+
+### 4. 本轮实测数字与留给别处的两条
+
+- `"$PY" -m unittest discover -s tests -t .` → `Ran 156 tests ... OK`（接手时 149 条、1 failed + 4 errors）。
+- `"$PY" -m ra.main --selfcheck` 仍通过（走 `%LOCALAPPDATA%\RecordedAutomation\selfcheck\` 自己的子目录，
+  不动真实工作流库与受控浏览器档案）。
+- 作品集验收器（只读，未改）`node scripts/verify-agent-apis.mjs --only=ra`：**「exec/破坏性 write 工具
+  没有 confirm 入参」这一条已经不再出现**（风险档与 confirm 的判据是它读的 `GET /api/agent/tools`，
+  25 个工具全表通过）。
+- ⚠ **留给 personal-agent-hub 的一条（不是本仓库能修的）**：同一个验收器现在在 ra 上另有 3 条红，
+  全是 `401 token_required` —— 它的 POST 不带 `x-agent-token`。这是 `69f8541` 加本机闸门之后的必然结果：
+  闸门按设计生效了，验收器还不知道要出示令牌（本仓库的 `agent/mcp-server.mjs` 每次调用现读令牌文件，
+  是合法路径的参考实现）。要修的是那边：读 `%LOCALAPPDATA%\RecordedAutomation\agent-token` 并加进请求头。
+  **放宽本仓库的闸门不是一条修法**，把那边判据改松也不是（本轮明令不许）。

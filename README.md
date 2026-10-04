@@ -91,15 +91,19 @@ python agent/server.py           # 不想开界面时，也能单独起一个同
 任何响应都不发通配 CORS（网页连预检都过不去）。这一条是 2026-10-05 验收返工补的：
 补之前用户访问的任意网页都能驱动全部 25 个工具。判据、令牌位置与手动调用写法详见 `agent/README.md`。
 
-工具按风险分三档，**write / exec 一律要在 `input` 里显式传 `confirm:true`**，缺了就返回 `bad_input`。
+工具按风险分三档：`read` 只读、`write` 改本机状态（会话或文件）、`exec` 真的跑活（开浏览器、驱动页面、
+起进程、把一份定义执行出去）。`confirm` 的要求按这个判据收窄：**exec 必须有 `confirm` 且缺省拒绝**；
+`write` 只在名字或描述含破坏性动词（删除 / 清空 / 覆盖 / 重置）时才强制；对自己那一场操作的收尾
+（`ra.record_stop`）这类可逆小写入不强制 —— 给每个写入都挂 `confirm` 只会把调用方训练成无脑传 `true`。
 `confirm` 是给 Agent 的二次确认（防手滑），不是安全边界 —— 它是请求体里的一个值，任何调用方都能自己写；
-决定"谁能发出这个请求"的是上面那道令牌闸门。
+决定"谁能发出这个请求"的是上面那道令牌闸门。判据本身有测试守着（`tests/test_agent_api.py`、
+`tests/test_agent_guard.py` 第 6 节），公示清单与验收器读的那一份不一致就会红。
 
 | 档 | 工具 |
 | --- | --- |
 | read | `ra.status` `ra.app_state` `ra.window_state` `ra.list_workflows` `ra.get_workflow` `ra.workflow_schema` `ra.validate_workflow` `ra.run_history` `ra.run_status` `ra.draft` `ra.list_secret_refs` |
-| write | `ra.save_workflow` `ra.save_draft` `ra.edit_step` `ra.move_step` `ra.remove_step` `ra.add_step` `ra.delete_workflow` `ra.set_secret` `ra.delete_secret` `ra.window_mode` |
-| exec | `ra.record_start` `ra.record_stop` `ra.run_workflow` `ra.cancel_run` |
+| write | `ra.save_workflow` `ra.save_draft` `ra.edit_step` `ra.move_step` `ra.remove_step` `ra.add_step` `ra.delete_workflow` `ra.set_secret` `ra.delete_secret` `ra.window_mode` `ra.record_stop` |
+| exec | `ra.record_start` `ra.run_workflow` `ra.cancel_run` |
 
 几条不变的边界：秘密值**永不**出现在任何工具的返回里（只有引用名与长度）；`ra.run_workflow` 支持
 `wait_s:0` 只发起不等待，之后用 `ra.run_status` 轮询；`from_step` 是人工指定的从失败步续跑；

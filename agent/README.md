@@ -81,8 +81,14 @@ POST /api/agent/tool      {"tool":"ra.xxx","input":{...}} → {ok:true,data:...,
 
 ## 工具清单（25 个）
 
-`risk` 三档：**read** 只读；**write** 会写本机文件；**exec** 会真的开浏览器操作页面。
-write / exec 一律要在 `input` 里显式传 `confirm:true`，缺了直接返回 `bad_input`。
+`risk` 三档按「这件事真的动了什么」判：**read** 只读，什么都不改；**write** 改本机状态（内存里的会话
+或磁盘上的文件），但不驱动页面；**exec** 真的跑活 —— 开浏览器、驱动页面、起进程、把一份定义执行出去。
+`confirm` 的要求照这个判据收窄（`AGENT_API_STANDARD.md` 第 4 条）：**exec 必须有 `confirm` 且缺省拒绝**；
+**write 只在名字或描述含破坏性动词（删除 / 清空 / 覆盖 / 重置）时才强制**；对自己那一场操作的收尾
+（`ra.record_stop`）与「取消一个自己建的东西」这类可逆小写入不强制 —— 把 `confirm` 塞给每一个写入，
+只会把调用方训练成无脑传 `true`，那才是标准点名的真退化。这一条判据由
+`tests/test_agent_guard.py::test_the_published_manifest_satisfies_standard_rule4` 在公示清单上逐条复查，
+`tests/test_agent_api.py` 在注册表上复查同一件事。
 
 ⚠ `confirm` 是**给 Agent 的二次确认**（防手滑），**不是安全边界**：它就在请求体里，任何能发出这个请求的人
 都能自己写 `true`。真正决定「谁能发出这个请求」的是上面那一节的本机令牌 —— 评审原话「唯一的闸门就是
@@ -102,7 +108,7 @@ schema 校验 → confirm。
 | `ra.save_workflow` | **write** | `workflow` + **`confirm:true`** | 是否写入、文件路径、校验结果 | `store.save()`（有阻塞项直接拒） |
 | `ra.save_draft` | **write** | **`confirm:true`**（可选 `workflow_id` / `name`） | 把当前草稿过一遍校验后写成本机工作流 | `Api.preview_workflow()` + `Api.save_workflow()` |
 | `ra.record_start` | **exec** | `url` + **`confirm:true`** | 打开受控浏览器并开始录制 | `Api.start_recording()` → `Session` |
-| `ra.record_stop` | **exec** | — | 停止录制并返回整理好的草稿（步数、丢弃计数、问题） | `Api.stop_recording()` |
+| `ra.record_stop` | write | —（不需要 confirm：不写本机文件、不起进程、不驱动页面，只是收尾） | 结束自己那一场录制并把草稿原样返回（步数、丢弃计数、问题）；没有进行中的录制时如实报 `stop_failed` | `Api.stop_recording()` → `Session.stop_recording()` |
 | `ra.draft` | read | — | 当前草稿每一步的编号、id、动作、定位器与匹配情况 | `Api.draft()` |
 | `ra.edit_step` | **write** | `step_id` + `patch` + **`confirm:true`** | 剪辑一个步骤（定位器 / expected / value / secret_ref / timeout） | `Api.edit_step()` |
 | `ra.move_step` | **write** | `step_id` + **`confirm:true`**（`offset` 或 `to_index`） | 调整顺序后的步骤列表 | `Api.move_step()` |
