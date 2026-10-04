@@ -154,6 +154,67 @@ class RunnerTests(unittest.TestCase):
 
 
 class ContractTests(unittest.TestCase):
+    def test_every_runner_construction_site_binds_the_real_signature(self):
+        """Runner 的四个协作者（driver / secrets / journal / stop）都是必需的位置参数。
+
+        少传一个只会让「跑起来的那一条」报 TypeError，而写错却恰好没被执行到的那一条
+        永远安静 —— 本仓库真发生过一次：一个测试助手按「三个协作者」的想象签名写
+        （Runner(driver, journal=None, secrets=lambda...)），替身还缺 act，于是它连炸都
+        炸不到被测对象上。这里不看意图，只把 ra/ 与 tests/ 里每一个 Runner(...) 构造点
+        按真实签名 bind 一遍：漏一个参数、换个关键字、位置顺序错位，全都当场变红。
+        """
+        import ast
+        import inspect
+
+        root = Path(__file__).resolve().parent.parent
+        signature = inspect.signature(Runner)
+        required = [name for name, item in signature.parameters.items()
+                    if item.default is inspect.Parameter.empty]
+        self.assertEqual(required, ["driver", "secrets", "journal", "stop"],
+                         "Runner 的真实签名变了：先确认界面装配点（ra/session.py）跟着改了没有")
+
+        seen = []
+        for folder in ("ra", "tests"):
+            for path in sorted((root / folder).rglob("*.py")):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+                    if name != "Runner":
+                        continue
+                    starred = [arg for arg in node.args if isinstance(arg, ast.Starred)]
+                    self.assertEqual(starred, [], f"{path.name}:{node.lineno} 用 *args 构造 Runner，签名检查失效")
+                    keywords = [item.arg for item in node.keywords if item.arg is None]
+                    self.assertEqual(keywords, [], f"{path.name}:{node.lineno} 用 **kwargs 构造 Runner，签名检查失效")
+                    given = [item.arg for item in node.keywords if item.arg]
+                    unknown = sorted(set(given) - set(signature.parameters))
+                    self.assertEqual(unknown, [], f"{path.name}:{node.lineno} 传了 Runner 没有的参数 {unknown}")
+                    try:
+                        signature.bind(*([object()] * len(node.args)),
+                                       **{key: object() for key in given})
+                    except TypeError as exc:
+                        self.fail(f"{path.name}:{node.lineno} 构造 Runner 的方式不合真实签名：{exc}")
+                    seen.append(f"{path.name}:{node.lineno}")
+        self.assertGreaterEqual(len(seen), 4, f"只找到这些构造点：{seen} —— 扫描本身失效了")
+        self.assertTrue(any(item.startswith("session.py:") for item in seen),
+                        f"连界面那条真实装配点都没扫到，这条检查就没有意义：{seen}")
+
+    def test_the_test_doubles_are_shaped_like_the_real_protocols(self):
+        """FakeDriver / FakeSecrets / MemoryJournal 必须各自长成 ra.core 那三个协议的样子。
+        替身不像真类时，Runner 会在替身上 AttributeError，那一刻测的已经不是 Runner 了。"""
+        def members(contract):
+            return {name for name in dir(contract) if not name.startswith("_")}
+
+        from ra.core import Driver, Journal, SecretStore
+
+        pairs = ((Driver, FakeDriver()), (SecretStore, FakeSecrets()), (Journal, MemoryJournal()))
+        for contract, instance in pairs:
+            required = members(contract)
+            self.assertTrue(required, f"{contract.__name__} 协议里没有方法，这条断言已经失效")
+            missing = sorted(name for name in required if not callable(getattr(instance, name, None)))
+            self.assertEqual(missing, [], f"{type(instance).__name__} 不像 {contract.__name__}：缺 {missing}")
+
     def test_locator_rules(self):
         with self.assertRaises(ValueError):
             Locator("role", "button")
