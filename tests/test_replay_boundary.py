@@ -3,19 +3,24 @@
 | GOOD（判据住在哪） | 这一组里钉住它的断言 |
 | --- | --- |
 | `ra/core.py::Workflow` 强制 `start_url` ∈ `origin` | `test_out_of_origin_start_url_is_refused_at_every_layer`（构造 / 校验面 / 存盘三层） |
+| 同一条判定在 Agent 工具面上也成立 | `test_the_agent_surface_refuses_the_same_workflow`（validate / save / run 三个出口） |
 | 绕过 save() 手放进磁盘的定义 | `test_a_hand_placed_out_of_origin_file_is_refused_before_the_browser_opens` |
 | origin 是协议 + 主机 + 端口三元组 | `test_same_origin_but_different_port_or_scheme_is_still_refused` |
-| `driver.in_scope` 每个动作前重查 | `test_in_scope_is_reevaluated_before_every_action` + `test_run_stops_at_the_first_action_after_the_page_leaves_the_origin` |
+| `driver.in_scope` 每个动作前重查 | `test_in_scope_is_reevaluated_before_every_action` + `test_run_stops_at_the_first_action_after_the_page_leaves_the_origin` + `test_the_completion_condition_lookup_is_gated_too` |
+| 重查读的是「当前那一页」而不是缓存的布尔值 | `test_the_real_adapter_reads_the_live_url_on_every_check`（真 `ra.driver.PlaywrightDriver`） |
 | `Runner.scrub()` 把喂进页面的值从原因里抹掉 | `test_scrub_strips_fed_values_from_reasons` |
+| 缺秘密引用时在动作之前停下，只报码不报值 | `test_a_missing_secret_reference_is_reported_by_name_only` |
 | 递给页面的 JS 只取自仓库里的固定片段 | `test_only_bundled_js_reaches_the_page` |
 | `paths.py` / `main.build()` 把浏览器档案钉在数据目录里 | `test_profile_dir_is_pinned_under_the_data_root` |
-| 上一条断言的替身必须像真类 | `test_the_doubles_are_shaped_like_the_real_contracts` |
+| 这一组的替身必须像真类 | `test_the_doubles_are_shaped_like_the_real_contracts` |
 
-不启动浏览器：被测的判定全是**真对象** —— `ra.core.Runner`、`ra.journal.FileJournal`（真的落盘，
-再从磁盘读回来查）、`ra.secrets.StaticSecrets`。只有「页面」这一半是假的，而它必须长成
-`ra.core.Driver` 协议的样子：少一个 `act`，Runner 就会在 `driver.act(...)` 上退化成
-AttributeError，那一刻被测的就不再是 Runner 了 —— 这正是本项目记过的那条教训（形状不像真类的
-替身不算测试），所以它也被钉成了断言，而不是靠人记得。
+不启动浏览器：被测的判定全是**真对象** —— `ra.core.Runner`、`ra.driver.PlaywrightDriver`、
+`ra.journal.FileJournal`（真的落盘，再从磁盘读回来查）、`ra.secrets.StaticSecrets`、
+`agent/tools.py` 里那份真工具表。只有「页面」与「本机数据目录」这两半是假的：页面换成只会
+报 URL 的记账对象，数据目录靠临时 `LOCALAPPDATA` 顶掉。替身必须长成 `ra.core.Driver` 协议的
+样子：少一个 `act`，Runner 就会在 `driver.act(...)` 上退化成 AttributeError，那一刻被测的
+就不再是 Runner 了 —— 这正是本项目记过的那条教训（形状不像真类的替身不算测试），所以它也被
+钉成了断言，而不是靠人记得。
 
 测试一律把 `LOCALAPPDATA` 指到临时目录：本机真实的录放台数据（工作流、秘密库、运行日志、
 受控浏览器档案里的 Cookie）不读也不写。
@@ -102,6 +107,31 @@ class RecordingDriver:
     @property
     def scope_checks(self) -> int:
         return self.timeline.count("in_scope")
+
+
+class FakePage:
+    """PlaywrightDriver 只向页面要 `url` —— 给一个会变的 url 就够，
+    这样「每次重查」这件事可以在不启动浏览器的情况下量出来。"""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.frames: list = []
+
+
+def load_agent_tools():
+    """按 agent/server.py 与进程内服务同一份路径把工具表读进来（真表，不是抄一份）。"""
+    import importlib.util
+    import sys
+
+    agent_dir = ROOT / "agent"
+    for path in (str(agent_dir), str(ROOT)):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    spec = importlib.util.spec_from_file_location("ra_agent_tools_boundary", agent_dir / "tools.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["ra_agent_tools_boundary"] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class IsolatedDataMixin:
@@ -318,9 +348,97 @@ class ReplayBoundaryTests(unittest.TestCase, IsolatedDataMixin):
         self.assertIn('script_path=resources / "ui" / "record_script.js"', main)
         self.assertTrue((resource_root() / "ui" / "record_script.js").is_file())
 
-    # -- 边界五：受控浏览器档案钉在数据目录里 -----------------------------------
+    # -- 边界五：Agent 那一面上同一条判定也得成立 --------------------------------
+    def test_the_agent_surface_refuses_the_same_workflow(self):
+        """同源判定必须在 Agent 的工具面上也成立：界面挡住了、工具面放行，等于门还开着。
+
+        69f8541 那道本机闸门管的是「谁能调」；这一条管的是「调得动也不许把越界的定义
+        写进本机、更不许拿去开浏览器跑」。三个出口都走 agent/tools.py 里那份真表。
+        """
+        resolved = self.isolate_data_root()
+        tools = load_agent_tools()
+        by_name = {tool["name"]: tool for tool in tools.TOOLS}
+        workflows = Path(resolved) / "workflows"
+        try:
+            # 1) 校验面：ra.validate_workflow 只回原因，并且把这一条列为阻塞项
+            report = by_name["ra.validate_workflow"]["handler"]({"workflow": EVIL})
+            self.assertTrue(report["schema_ok"], "JSON Schema 这一层就挡住了，下面的语义层断言没意义")
+            self.assertTrue(any("start_url" in item for item in report["blocking"]), report)
+            self.assertFalse(report["saved"], report)
+            self.assertFalse(workflows.exists() and list(workflows.glob("*.workflow.json")),
+                             "validate 不该写盘")
+            # 2) 写盘面：带着 confirm:true 也照样被拒，本机工作流库里没有留下这个文件
+            with self.assertRaises(tools.AgentError) as saved:
+                by_name["ra.save_workflow"]["handler"]({"workflow": EVIL, "confirm": True})
+            self.assertEqual(saved.exception.code, "bad_input")
+            self.assertIn("start_url", str(saved.exception))
+            self.assertFalse(workflows.exists() and list(workflows.glob("*.workflow.json")),
+                             "越界的定义被 Agent 写进了本机工作流库")
+            # 3) 运行面：手放一个越界定义（绕过工具的写入路径），运行必须在开浏览器之前被拒
+            workflows.mkdir(parents=True, exist_ok=True)
+            (workflows / "wf_evil.workflow.json").write_text(json.dumps(EVIL, ensure_ascii=False),
+                                                              encoding="utf-8")
+            with self.assertRaises(tools.AgentError) as run:
+                by_name["ra.run_workflow"]["handler"]({"workflow_id": "wf_evil", "confirm": True})
+            self.assertEqual(run.exception.code, "run_refused")
+            self.assertIn("start_url", str(run.exception))
+            # 4) 对照品：只差 start_url 同源的那一份必须写得进去 —— 否则上面三条只是「什么都拒」
+            saved_ok = by_name["ra.save_workflow"]["handler"]({"workflow": GOOD, "confirm": True})
+            self.assertTrue(saved_ok["saved"], saved_ok)
+            # 5) 本机列表面怎么交代那份手放的文件：列得出来，但标成损坏，并且跑不起来
+            rows = {row["id"]: row for row in
+                    WorkflowStore(workflows, resource_root() / "workflow.schema.json").list()}
+            self.assertEqual(sorted(rows), ["wf_evil.workflow", "wf_origin"], rows)
+            self.assertIn("start_url", rows["wf_evil.workflow"]["broken"], rows)
+            self.assertEqual(rows["wf_origin"]["broken"], "", rows)
+        finally:
+            self.release_data_root()
+
+    # -- 边界六：适配器那一道查的是「当前那一页」 --------------------------------
+    def test_the_real_adapter_reads_the_live_url_on_every_check(self):
+        """`in_scope` 之所以算「每次动作前重查」，是因为它每次都重新读当前页面的 URL，
+        不是开局算好一个布尔值存下来。这里用的是真的 `ra.driver.PlaywrightDriver`。"""
+        from ra.driver import OutOfScope, PlaywrightDriver, Resolved, same_origin
+
+        page = FakePage(f"{ORIGIN}/apply/form")
+        driver = PlaywrightDriver(page, ORIGIN)
+        self.assertTrue(driver.in_scope(ORIGIN))
+        page.url = "https://attacker.test/collect"          # 页面自己跳走了
+        self.assertFalse(driver.in_scope(ORIGIN), "in_scope 把开局那一次的结果缓存下来了")
+        page.url = f"{ORIGIN}/apply/form"
+        self.assertTrue(driver.in_scope(ORIGIN), "回到同源之后仍要认：判定不是单向的")
+        page.url = "about:blank"
+        self.assertFalse(driver.in_scope(ORIGIN), "空白页不许算作同源（那还没有任何页面）")
+        # 动作那一步适配器自己还有一道：就算策略层漏查了，越界的页面也发不出动作
+        page.url = "https://attacker.test/collect"
+        with self.assertRaises(OutOfScope):
+            driver.act(Action.CLICK, Resolved(locator=object(), timeout_ms=1000.0), None)
+        # 与 Workflow 那条判定同一把尺：协议或端口不同就不算同源
+        self.assertTrue(same_origin("https://hr.example.test/apply", ORIGIN))
+        self.assertFalse(same_origin("https://hr.example.test:8443/apply", ORIGIN))
+        self.assertFalse(same_origin("http://hr.example.test/apply", ORIGIN))
+
+    # -- 边界七：完成条件那一次定位也过一次闸门 ----------------------------------
+    def test_the_completion_condition_lookup_is_gated_too(self):
+        """动作发出去之后核对完成条件，同样是「先查同源再读页面」；等待步一个动作都不发。"""
+        driver = RecordingDriver()
+        payload = dict(GOOD, id="wf_gated", steps=GOOD["steps"] + [
+            {"id": "s2", "action": "wait_for",
+             "target": {"page": "main", "locators": [{"strategy": "text", "value": "受理编号"}]}}])
+        result = self.runner(driver).run(workflow(payload))
+        self.assertEqual(result.status.value, "completed", result.reason)
+        self.assertEqual(driver.timeline,
+                         ["in_scope",                          # 第一步开局闸门
+                          "in_scope", "resolve",               # 定位目标之前
+                          "in_scope", "act",                   # 发动作之前
+                          "in_scope", "resolve",               # 核对完成条件之前
+                          "in_scope", "in_scope", "resolve"],  # 等待步：两次闸门 + 定位，没有 act
+                         f"调用顺序变了：{driver.timeline}")
+        self.assertEqual(driver.acts, 1, "wait_for 那一步不该发出任何动作")
+
+    # -- 边界八：受控浏览器档案钉在数据目录里 -----------------------------------
     def test_profile_dir_is_pinned_under_the_data_root(self):
-        """`paths.py` + `main.build()` 把受控浏览器档案钉在数据目录里，位置是确定的一个：
+        """`paths.py` + `main.build()` 把受控浏览器档案钉在数据目录里，而且位置是确定的一个：
         不许每次装配换一个地方（那等于登录态留不下来），也不许指回用户自己浏览器的
         profile（那里面是真实登录态）或仓库里那份遗留档案目录。"""
         resolved = self.isolate_data_root()
