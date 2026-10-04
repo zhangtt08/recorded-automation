@@ -15,10 +15,18 @@ ROOT = os.path.dirname(os.path.dirname(_here))
 ENTRY = os.path.join(ROOT, "run_app.py")
 assert os.path.isfile(ENTRY), "找不到入口脚本：" + ENTRY
 UI = os.path.join(ROOT, "ra", "ui")
+AGENT = os.path.join(ROOT, "agent")
 
 datas = [
     (UI, "ra/ui"),
     (os.path.join(ROOT, "ra", "workflow.schema.json"), "ra"),
+    # Agent 接口跑在同一个进程里：工具表、错误类、MCP 桥与示例都要随包一起走
+    (os.path.join(AGENT, "tools.py"), "agent"),
+    (os.path.join(AGENT, "errors.py"), "agent"),
+    (os.path.join(AGENT, "mcp-server.mjs"), "agent"),
+    (os.path.join(AGENT, "launch.json"), "agent"),
+    (os.path.join(AGENT, "README.md"), "agent"),
+    (os.path.join(ROOT, "example.workflow.json"), "."),
 ]
 datas += collect_data_files("playwright")
 datas += collect_data_files("jsonschema")

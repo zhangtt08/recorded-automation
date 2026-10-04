@@ -6,11 +6,12 @@ imports a UI toolkit, OS automation library, or persistence framework.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from threading import Event
 from time import monotonic
-from typing import Protocol
+from typing import Optional, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -118,6 +119,7 @@ class RunEvent:
     step_id: str
     phase: str                    # step_started/action_started/action_returned/verified/...
     code: str = ""                # Stable error code, never user input or secret data.
+    reason: str = ""              # Human-readable why, redacted; empty for non-terminal phases.
 
 
 @dataclass(frozen=True)
@@ -126,6 +128,7 @@ class RunResult:
     status: Status
     step_id: str | None
     code: str = ""
+    reason: str = ""
 
 
 class Driver(Protocol):
@@ -164,6 +167,33 @@ class TargetTimeout(Exception):
     pass
 
 
+# 失败原因要说清「为什么」，并且不能带上页面内容之外的东西；上限只用于显示。
+REASON_LIMIT = 2000
+
+
+def friendly_reason(code: object, detail: object = "") -> str:
+    """把错误码翻译成可行动的一句中文；未知异常如实带上原因（调用方负责脱敏）。"""
+    text = str(detail or "").strip()
+    head = re.sub(r"\s+", " ", text)[:REASON_LIMIT] if text else ""
+    known = {
+        "TargetTimeout": "找不到目标元素，或在超时时间内它没有出现（页面改版、还没走到那一步、"
+                         "或完成条件的文本没有出现）",
+        "AmbiguousTarget": "定位器匹配到多个元素，程序不会替你猜哪一个",
+        "MissingFrame": "录的那一步在 iframe 里，回放时页面上找不到那个框架",
+        "MissingPage": "录的那一步在另一个标签页/弹窗里，当前版本只支持单标签页",
+        "MissingTarget": "这一步需要作用在某个元素上，但回放时那个元素已经不在了",
+        "PageOutOfScope": "页面已经跳到允许来源之外的地址，为安全起见停下来了",
+        "OutOfScope": "页面已经跳到允许来源之外的地址，为安全起见停下来了",
+        "RunCancelled": "按停止请求取消",
+        "UnknownSecret": "秘密库里读不到这个引用对应的值",
+    }
+    if code in known:
+        return known[code]
+    if head:
+        return head
+    return str(code or "") + "（未收录的原因，详情见诊断记录）"
+
+
 class Runner:
     """Sequential replay. Only locating/waiting is retried; an action is never retried."""
 
@@ -182,6 +212,11 @@ class Runner:
         self.journal = journal
         self.stop = stop
         self.poll_s = poll_s
+        # What the last failed wait was looking for, so the reason can name it.
+        self._context = ""
+        self._context_kind = "目标"
+        # Values handed to the page this run; scrubbed out of every reason before logging.
+        self._scrub: list[str] = []
 
     def run(self, workflow: Workflow, run_id: str | None = None) -> RunResult:
         run_id = run_id or uuid4().hex
@@ -203,8 +238,9 @@ class Runner:
                 return RunResult(run_id, Status.CANCELLED, step.id)
             except Exception as exc:
                 code = type(exc).__name__
-                self._try_emit(run_id, workflow, step, "failed_before_action", code)
-                return RunResult(run_id, Status.FAILED, step.id, code)
+                reason = self.reason_for(exc)
+                self._try_emit(run_id, workflow, step, "failed_before_action", code, reason)
+                return RunResult(run_id, Status.FAILED, step.id, code, reason)
 
             try:
                 # The adapter must use bounded calls. A blocked OS call cannot be
@@ -212,7 +248,7 @@ class Runner:
                 self.driver.act(step.action, element, argument)
                 self._emit(run_id, workflow, step, "action_returned")
                 if step.expected is not None:
-                    self._wait_for(workflow.origin, step.expected, step.timeout_s)
+                    self._wait_for(workflow.origin, step.expected, step.timeout_s, describe="完成条件")
                     self._emit(run_id, workflow, step, "verified")
                 else:
                     unverified = True
@@ -221,8 +257,9 @@ class Runner:
                 # An adapter error, postcondition timeout, or stop request after
                 # action_started cannot prove whether the UI side effect happened.
                 code = type(exc).__name__
-                self._try_emit(run_id, workflow, step, "uncertain", code)
-                return RunResult(run_id, Status.UNCERTAIN, step.id, code)
+                reason = self.reason_for(exc)
+                self._try_emit(run_id, workflow, step, "uncertain", code, reason)
+                return RunResult(run_id, Status.UNCERTAIN, step.id, code, reason)
 
         return RunResult(
             run_id,
@@ -232,24 +269,65 @@ class Runner:
 
     def _argument(self, step: Step) -> str | None:
         if step.action == Action.FILL:
-            return self.secrets.get(step.secret_ref) if step.secret_ref else step.text
+            value = self.secrets.get(step.secret_ref) if step.secret_ref else step.text
+            # 记下来：任何原因文本里都不许出现被交给页面的值（Playwright 的报错会把
+            # select_option 的取值原样回显，秘密值就是从这条缝里漏进日志的）。
+            if value:
+                self._scrub.append(str(value))
+            return value
         if step.action == Action.HOTKEY:
             return step.hotkey
         return None
 
-    def _wait_for(self, origin: str, target: Target | None, timeout_s: float) -> object | None:
+    def _wait_for(self, origin: str, target: Target | None, timeout_s: float,
+                  describe: str | None = None) -> object | None:
         if target is None:
             return None
+        self._context = self._describe(target)
+        self._context_kind = describe or "目标"
         deadline = monotonic() + timeout_s
         while True:
             self._guard(origin)
             element = self.driver.resolve(target, timeout_s)
             if element is not None:
+                self._context = ""
                 return element
             remaining = deadline - monotonic()
             if remaining <= 0:
                 raise TargetTimeout()
             self.stop.wait(min(self.poll_s, remaining))
+
+    @staticmethod
+    def _describe(target: Target) -> str:
+        """Locators that were tried — selector text, never page content or input values."""
+        parts = []
+        for locator in target.locators:
+            shown = f"{locator.strategy}:{locator.value}"
+            if locator.name:
+                shown += f"（名称「{locator.name}」）"
+            parts.append(shown)
+        return "、".join(parts[:4])
+
+    def reason_for(self, exc: Exception) -> str:
+        """一句人能照着做的话；原始原因（Playwright 的调用日志等）跟在后面，先脱敏。"""
+        code = type(exc).__name__
+        raw = getattr(exc, "reason", "") or str(exc)
+        if code == "TargetTimeout" and getattr(self, "_context", ""):
+            kind = self._context_kind
+            extra = f"试过的定位器：{self._context}" if kind == "目标" else f"{kind}没有出现：{self._context}"
+            raw = f"{extra}（超时）" if not raw else f"{extra}；{raw}"
+        elif code == "UnknownSecret":
+            raw = f"缺少的引用名：{exc.args[0] if exc.args else exc}"
+        return friendly_reason(code, self.scrub(raw))
+
+    def scrub(self, text: object) -> str:
+        """把交给过页面的值（普通文本与秘密值）从任何要落盘的原因里换掉。"""
+        value = str(text or "")
+        for secret in self._scrub:
+            if secret and len(secret) >= 3 and secret in value:
+                value = value.replace(secret, "***")
+        return re.sub(r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization)\b\s*[:=]\s*\S+",
+                      r"\1=***", value)
 
     def _guard(self, origin: str) -> None:
         if self.stop.is_set():
@@ -257,12 +335,14 @@ class Runner:
         if not self.driver.in_scope(origin):
             raise PageOutOfScope()
 
-    def _emit(self, run_id: str, workflow: Workflow, step: Step, phase: str, code: str = "") -> None:
-        self.journal.append(RunEvent(run_id, workflow.id, step.id, phase, code))
+    def _emit(self, run_id: str, workflow: Workflow, step: Step, phase: str, code: str = "",
+              reason: str = "") -> None:
+        self.journal.append(RunEvent(run_id, workflow.id, step.id, phase, code, reason))
 
-    def _try_emit(self, run_id: str, workflow: Workflow, step: Step, phase: str, code: str = "") -> None:
+    def _try_emit(self, run_id: str, workflow: Workflow, step: Step, phase: str, code: str = "",
+                  reason: str = "") -> None:
         try:
-            self._emit(run_id, workflow, step, phase, code)
+            self._emit(run_id, workflow, step, phase, code, reason)
         except Exception:
             # The result still reports the failure. Never attempt another UI action.
             pass

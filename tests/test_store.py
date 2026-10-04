@@ -43,6 +43,16 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(report["blocking"], [])
         self.assertEqual(report["warnings"], [])
 
+    def test_load_and_delete_reject_ids_outside_store(self):
+        outside = Path(self.tmp) / "outside.workflow.json"
+        outside.write_text(json.dumps(GOOD), encoding="utf-8")
+        for invalid in ("../outside", "..\\outside", str(outside), "", "wf_contact\n"):
+            for operation in (self.store.load, self.store.delete):
+                with self.subTest(id=invalid, operation=operation.__name__):
+                    with self.assertRaises(ValueError):
+                        operation(invalid)
+        self.assertTrue(outside.exists())
+
     def test_role_locator_needs_accessible_name(self):
         payload = self.payload(steps=[{"id": "s1", "action": "click",
                                        "target": {"page": "main", "locators": [{"strategy": "role", "value": "button"}]}}])

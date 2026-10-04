@@ -18,11 +18,12 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
-from .core import Journal, Locator as StepLocator, RunEvent, RunResult, Runner, workflow_from_dict
+from .core import (Journal, Locator as StepLocator, RunEvent, RunResult, Runner, friendly_reason,
+                   step_to_dict, workflow_from_dict)
 from .driver import PlaywrightDriver, build_locator
 from .engine import launch_persistent
 from .journal import FileJournal
-from .normalizer import Draft
+from .normalizer import Draft, step_label
 from .paths import browsers_path_env
 from .recorder import Recorder
 
@@ -143,6 +144,8 @@ class Session:
         self.runs: dict[str, dict] = {}
         self.engine = ""
         self.last_error = ""
+        # 可诊断日志（真实原因，脱敏后落盘）；由 main.build 接上，测试里保持 None 也能跑。
+        self.diagnostics = None
 
     # -- plumbing --------------------------------------------------------
     def _call(self, fn: Callable[[], object], timeout: float = 60.0):
@@ -413,13 +416,25 @@ class Session:
         self.state = "running"
         self.runs[run_id] = {"run_id": run_id, "workflow_id": workflow.id,
                              "workflow_name": workflow.name or workflow.id,
-                             "status": "running", "step_id": "", "code": "", "error": "", "events": [],
+                             "status": "running", "step_id": "", "code": "", "error": "", "reason": "",
+                             "events": [], "steps": [step_to_dict(step) for step in workflow.steps],
                              "started_at": time.time(), "ended_at": 0,
                              "resumed": dict(resumed or {})}
+        self._diagnostic_launch(run_id, workflow, resumed)
         self.notify("state", self.snapshot())
         self._run_future = self._worker.submit(lambda: self._execute(run_id, payload))
         self._run_future.add_done_callback(lambda future: self._run_done(run_id, future))
         return {"run_id": run_id, "steps": len(workflow.steps)}
+
+    def _diagnostic_launch(self, run_id: str, workflow, resumed: dict | None) -> None:
+        """先落一条「这次运行开始了」：没有它就无法区分「取消了一次运行」和「压根没跑起来」。"""
+        if getattr(self, "diagnostics", None) is None:
+            return
+        try:
+            self.diagnostics.launch(run_id, workflow.id, workflow.name or workflow.id, len(workflow.steps),
+                                    str((resumed or {}).get("from_step", "")))
+        except Exception:
+            pass
 
     def _execute(self, run_id: str, payload: dict) -> RunResult:
         workflow = workflow_from_dict(payload)
@@ -447,12 +462,23 @@ class Session:
         try:
             result = future.result()
             status, step_id, code = result.status.value, result.step_id or "", result.code
-        except Exception as exc:  # 驱动或启动失败也报告为动作前的失败
+            record["reason"] = str(getattr(result, "reason", "") or "")
+        except Exception as exc:  # 驱动或启动失败：没进过 Runner，所以这里自己补一条阶段事件
             status, step_id, code = "failed", "", type(exc).__name__
-            record["error"] = str(exc).splitlines()[0] if str(exc) else ""
+            message = str(exc)
+            record["error"] = message
+            record["reason"] = friendly_reason(code, message)
+            workflow_id = str(record.get("workflow_id", ""))
+            try:
+                self.journal.append(RunEvent(run_id, workflow_id, "", "failed_before_action", code,
+                                             record["reason"]))
+            except Exception:
+                pass
+        self._record_diagnostic(run_id, record, status, step_id, code)
         record.update({"status": status, "step_id": step_id, "code": code, "ended_at": time.time()})
         try:
-            self.journal.append(RunEvent(run_id, record.get("workflow_id", ""), step_id, status, code))
+            self.journal.append(RunEvent(run_id, record.get("workflow_id", ""), step_id, status, code,
+                                         str(record.get("reason", ""))))
         except Exception:
             pass
         self.state = "idle"
@@ -460,6 +486,30 @@ class Session:
         self.notify("state", self.snapshot())
         if not self.settings.all().get("keep_browser_open", True):
             self.close_browser()
+
+    def _record_diagnostic(self, run_id: str, record: dict, status: str, step_id: str, code: str) -> None:
+        """失败/未确认/取消都留下可诊断的一行：第几步、在做什么、真实原因、秘密值处理了几次。"""
+        if getattr(self, "diagnostics", None) is None:
+            return
+        try:
+            steps = record.get("steps") or []
+            position = next((index for index, item in enumerate(steps, start=1) if item.get("id") == step_id), 0)
+            step = steps[position - 1] if position else {}
+            secret_refs = sorted({str(item.get("secret_ref")) for item in steps if item.get("secret_ref")})
+            # 「秘密值被取用了几次」按事件数出来：值本身一个字节都不进诊断文件。
+            secret_steps = {str(item.get("id")) for item in steps if item.get("secret_ref")}
+            used = sum(1 for event in record.get("events", [])
+                       if event.get("phase") == "action_returned" and str(event.get("step_id")) in secret_steps)
+            self.diagnostics.record(
+                run_id=run_id, workflow_id=str(record.get("workflow_id", "")),
+                workflow_name=str(record.get("workflow_name", "")), status=status,
+                step_id=step_id, index=position, total=len(steps), action=str(step.get("action", "")),
+                label=step_label(step) if step else "", code=code,
+                reason=str(record.get("reason", "")), error=str(record.get("error", "")),
+                events=[event.get("phase", "") for event in record.get("events", [])],
+                secret_refs=secret_refs, secret_values_used=used)
+        except Exception as exc:  # 诊断本身绝不能把运行结果带跑
+            record["diagnostic_error"] = f"{type(exc).__name__}: {exc}"
 
     def run_status(self, run_id: str) -> dict:
         record = self.runs.get(run_id)
@@ -473,7 +523,12 @@ class Session:
         if self.state != "running":
             return {"cancelled": False, "note": "当前没有进行中的运行"}
         self._stop.set()
-        return {"cancelled": True, "note": "将在当前动作结束后停止，不会自动重试"}
+        running = [row for row in self.runs.values() if row.get("status") == "running"]
+        note = "将在当前动作结束后停止，不会自动重试"
+        if running and not running[0].get("events"):
+            note = ("这次运行还没有执行到任何一步（正在打开页面或刚起跑）：会立刻停下，"
+                    "任何动作都没有发出过，可以从第一步重跑")
+        return {"cancelled": True, "note": note, "run_id": running[0]["run_id"] if running else ""}
 
     # -- lifecycle -------------------------------------------------------
     def close_browser(self) -> None:

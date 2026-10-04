@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -46,6 +47,42 @@ PROJECT = {
 }
 
 MAX_TIMELINE = 300
+
+# 进程内服务（ra/agentapi.py）会 bind 界面那套会话；独立跑 agent/server.py 时才自己装配。
+RUNTIME: dict[str, object] = {"api": None, "session": None}
+
+
+def bind(api, session) -> None:
+    """让工具复用界面正在用的 Session：Agent 的录制与运行会实时反映在界面上，
+    也不会和界面抢同一个浏览器档案目录。"""
+    RUNTIME["api"] = api
+    RUNTIME["session"] = session
+
+
+def bound() -> bool:
+    return RUNTIME.get("api") is not None
+
+
+def _runtime():
+    """返回 (api, session, owned)。owned=True 表示这套是本次临时装的，用完必须关掉。"""
+    if RUNTIME.get("api") is not None:
+        return RUNTIME["api"], RUNTIME["session"], False
+    from ra.main import build
+
+    api, session, _ = build()
+    return api, session, True
+
+
+def _headless_for(session, headless: bool):
+    """复用界面会话时临时改这一次运行的 headless，用完原样还回去。"""
+    if not bound():
+        session.settings = _RunSettings(session.settings, headless)
+        return None
+    original = session.settings
+    session.settings = _RunSettings(original, headless)
+    return original
+
+
 
 
 # --------------------------------------------------------------------------- helpers
@@ -137,6 +174,9 @@ def _status(input: dict) -> dict:
         "runs": len(_journal().list_runs(limit=500)),
         "secret_refs": [item["ref"] for item in secrets.preview()],
         "settings": settings.all(),
+        "serving": {"in_process": bound(),
+                    "state": (RUNTIME["session"].snapshot() if bound() and RUNTIME.get("session") else {}),
+                    "note": "in_process=true 表示这个接口跑在桌面程序同一个进程里，界面能实时看到 Agent 的录制与运行"},
         "browser_cache": {"env": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
                           "available": sorted({str(item) for item in candidates if item.is_dir()}),
                           "note": "这里只报告引擎缓存的解析结果；真正启动浏览器发生在 ra.run_workflow（ra/engine.py 会依次尝试 Chromium 与本机 Edge）"},
@@ -213,9 +253,8 @@ def _run(input: dict) -> dict:
     _require_confirm(input, "在真实浏览器里执行这个工作流（会点击、填写、按键）")
     from_step = str(input.get("from_step") or "")
     headless = bool(input.get("headless", True))
-    wait_s = max(5.0, min(float(input.get("wait_s") or 180.0), 900.0))
-
-    from ra.main import build                        # 与界面同一个装配：Api → Session → Driver → Runner
+    raw_wait = input.get("wait_s")
+    wait_s = 0.0 if raw_wait == 0 else max(5.0, min(float(raw_wait if raw_wait is not None else 180.0), 900.0))
 
     store, _, _ = _store_and_vault()
     try:
@@ -225,8 +264,8 @@ def _run(input: dict) -> dict:
         raise AgentError("not_found", f"没有 id 为 {workflow_id} 的工作流；本机现有：" +
                          (", ".join(known) or "（还没有保存过工作流）")) from None
 
-    api, session, _ = build()
-    session.settings = _RunSettings(session.settings, headless)
+    api, session, owned = _runtime()                 # 与界面同一个装配：Api → Session → Driver → Runner
+    original_settings = _headless_for(session, headless)
     try:
         started = api.run_workflow(workflow_id, from_step)
         if started.get("error"):
@@ -235,6 +274,11 @@ def _run(input: dict) -> dict:
                 "" if not started.get("missing_secret")
                 else "；引用名可用 ra.list_secret_refs 查到，填值只能在界面上做（Agent 不经手秘密值）"))
         run_id = started["run_id"]
+        if wait_s == 0:                              # 只发起不等待：长流程交给 Agent 自己轮询
+            return {"run_id": run_id, "workflow_id": workflow_id, "status": "running", "async": True,
+                    "steps": started.get("steps", []), "headless": headless,
+                    "note": "已发起、未等待。用 ra.run_status 轮询，用 ra.cancel_run 停止；"
+                            "程序不会自动重试，也不会替你判断结果"}
         deadline = time.time() + wait_s
         timed_out = False
         while time.time() < deadline:
@@ -283,23 +327,25 @@ def _run(input: dict) -> dict:
             out["manual_check"] = "动作已发出且只发一次，无法确认页面是否生效；先人工检查受控浏览器页面，再决定重新运行或从失败步续跑"
         return out
     finally:
-        try:
-            api.shutdown()                            # 一定关掉本次自己起的受控浏览器
-        except Exception:
-            pass
+        if original_settings is not None:
+            session.settings = original_settings
+        if owned:
+            try:
+                api.shutdown()                        # 只关本次自己起的受控浏览器，别把界面的关掉
+            except Exception:
+                pass
 
 
 def _run_history(input: dict) -> dict:
     run_id = str(input.get("run_id") or "").strip()
     journal = _journal()
     if run_id:
-        from ra.main import build
-
-        api, session, _ = build()                     # 只读时间线，不会启动浏览器
+        api, session, owned = _runtime()              # 只读时间线，不会启动浏览器
         try:
             detail = (api.run_detail(run_id) or {}).get("detail") or {}
         finally:
-            session.shutdown()
+            if owned:
+                session.shutdown()
         if not detail.get("events"):
             raise AgentError("not_found", f"日志里没有 {run_id} 这个阶段事件；最近运行可用不带 run_id 的调用查到")
         timeline = detail.get("timeline") or []
@@ -416,4 +462,452 @@ TOOLS = [
         "risk": "read",
         "handler": _secret_refs,
     },
+]
+
+
+# ------------------------------------------------------------------ 交付版新增能力
+def _schema(input: dict) -> dict:
+    """把「怎么写一份能跑的工作流」的全部约束一次交给 Agent，不用它去读源码。"""
+    schema_path = resource_root() / "workflow.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8")) if schema_path.is_file() else {}
+    example_path = ROOT / "example.workflow.json"
+    example = json.loads(example_path.read_text(encoding="utf-8")) if example_path.is_file() else {}
+    return {
+        "schema": schema, "schema_path": str(schema_path), "example": example,
+        "actions": ["click", "fill", "hotkey", "wait_for"],
+        "locator_strategies": ["role", "label", "test_id", "text", "css"],
+        "locator_shapes": {
+            "每一个定位器都是 {strategy, value}，additionalProperties:false": "strategy 只能是那五种",
+            "role": {"strategy": "role", "value": "button|textbox|checkbox|...", "name": "可访问名称（role 必填）"},
+            "label": {"strategy": "label", "value": "表单 label 文本"},
+            "test_id": {"strategy": "test_id", "value": "data-testid 值"},
+            "text": {"strategy": "text", "value": "页面上可见的文本"},
+            "css": {"strategy": "css", "value": "CSS 选择器"},
+            "step_shapes": {
+                "click / wait_for": "需要 target；可选 expected、timeout_s",
+                "fill": "需要 target，并且 text 与 secret_ref 二选一（同时给会被拒）",
+                "hotkey": "需要 hotkey 字段，不需要 target",
+                "expected": "和 target 同形 {page, locators}，是动作之后的可观察完成条件；不写则结果为 completed_unverified",
+                "不允许的字段": "additionalProperties:false —— 例如把 fill 的内容写成 value 会被直接拒绝",
+            },
+            "注意": "role 之外不要带 name，带了会被 Schema 直接拒绝；target 形如 "
+                   "{\"page\": \"main\", \"locators\": [ ... ]}，steps 里 expected 可以省略",
+        },
+        "rules": [
+            "schema_version 固定为 1；id 满足 ^[A-Za-z0-9_-]{1,64}$，同时作为文件名",
+            "steps 非空且 step.id 在工作流内唯一",
+            "start_url 与 origin 必须同源，且 URL 里不能带 token/password 这类令牌参数",
+            "role 定位器必须带 name（可访问名称），否则保存被拒",
+            "target.locators 按 role → label → test_id → text → css 排序；多匹配会停在动作之前，需要人工选定",
+            "expected 是执行后的可观察完成条件（ref 指向另一步骤的目标，或按页面文本判断）；"
+            "不设则结果为 completed_unverified",
+            "秘密值只写 secret_ref 引用名，值由人在界面或 ra.set_secret 填进本机加密库；工作流与日志里永不出现明文",
+        ],
+        "result_states": {
+            "completed": "所有步骤执行完，且设了完成条件的都被验证过",
+            "completed_unverified": "步骤执行完，但有动作没设完成条件，程序没有证据",
+            "uncertain": "动作已发出且只发出一次，之后超时/异常/取消，无法判断页面是否生效；不自动重试",
+            "failed": "在动作发生之前就停了（目标缺失、多匹配、来源变化、缺秘密值）",
+            "cancelled": "人工点了停止",
+        },
+        "note": "这份返回就是保存前双层校验所依据的约束；改之前可先跑 ra.validate_workflow（不落盘）",
+    }
+
+
+def _cleanup(api, owned: bool) -> None:
+    if owned:
+        try:
+            api.shutdown()                    # 只关本次临时装的浏览器，别把界面那套关掉
+        except Exception:
+            pass
+
+
+def _delete_workflow(input: dict) -> dict:
+    workflow_id = str(input.get("workflow_id") or "").strip()
+    if not workflow_id:
+        raise AgentError("bad_input", "缺少必填参数：workflow_id")
+    _require_confirm(input, f"删除本机工作流 {workflow_id}（运行日志会保留）")
+    api, session, owned = _runtime()
+    try:
+        result = api.delete_workflow(workflow_id)
+        if isinstance(result, dict) and result.get("error"):
+            raise AgentError("bad_input", result["error"])
+        return {"deleted": True, "id": workflow_id,
+                "note": "只删定义文件；journal 里已经发生的事实不会被删掉，历史运行会标出「工作流已删除」"}
+    finally:
+        _cleanup(api, owned)
+
+
+def _set_secret(input: dict) -> dict:
+    ref = str(input.get("ref") or "").strip()
+    value = input.get("value")
+    if not ref:
+        raise AgentError("bad_input", "缺少必填参数：ref（秘密引用名）")
+    if not isinstance(value, str) or value == "":
+        raise AgentError("bad_input", "value 必须是非空字符串；要删除用 ra.delete_secret")
+    _require_confirm(input, f"写入秘密引用 {ref} 的值（用当前 Windows 账户加密保存在本机）")
+    _, secrets, _ = _store_and_vault()
+    secrets.set(ref, value)
+    return {"ref": ref, "stored": True, "length": len(value), "value_returned": False,
+            "note": "值只写进本机加密库，任何工具的返回里都不会再出现它"}
+
+
+def _delete_secret(input: dict) -> dict:
+    ref = str(input.get("ref") or "").strip()
+    if not ref:
+        raise AgentError("bad_input", "缺少必填参数：ref")
+    _require_confirm(input, f"删除秘密引用 {ref}；用到它的工作流会在打开浏览器之前被拦下")
+    _, secrets, _ = _store_and_vault()
+    secrets.delete(ref)                                  # delete() 不返回东西，只能回读确认
+    return {"ref": ref, "deleted": not secrets.has(ref)}
+
+
+def _app_state(input: dict) -> dict:
+    api, session, owned = _runtime()
+    try:
+        snapshot = session.snapshot() if session is not None else {}
+        draft = (api.draft() or {}).get("draft") or {}
+        window = (api.win_state() or {}) if getattr(api, "window", None) is not None else {}
+        return {"state": snapshot,
+                "draft_steps": len(draft.get("steps") or []),
+                "draft_problems": draft.get("problems") or [],
+                "window": {"mode": window.get("mode"), "frameless": window.get("frameless"),
+                           "titlebar_hidden": window.get("titlebar_hidden"),
+                           "strip": window.get("strip"), "content": window.get("content")},
+                "in_process": bound(),
+                "note": "in_process=true 时这里读到的就是界面正在显示的状态；录制与回放互斥"}
+    finally:
+        _cleanup(api, owned)
+
+
+def _record_start(input: dict) -> dict:
+    url = str(input.get("url") or "").strip()
+    if not url:
+        raise AgentError("bad_input", "缺少必填参数：url（要录制的页面地址，录制范围就是这个来源）")
+    _require_confirm(input, "打开受控浏览器并开始录制操作")
+    api, session, owned = _runtime()
+    try:
+        result = api.start_recording(url) or {}
+        if result.get("error"):
+            hint = _launch_hint(result["error"])
+            raise AgentError("record_refused", result["error"] + (("\n" + hint) if hint else ""))
+        return {"recording": True, "url": url, "state": (api.state() or {}),
+                "note": "在受控浏览器里操作即产生候选事件；ra.draft 读、ra.record_stop 结束。"
+                        "候选事件必须经审阅（人工或 ra.edit_step）才会保存为工作流"}
+    finally:
+        _cleanup(api, owned)
+
+
+def _record_stop(input: dict) -> dict:
+    api, session, owned = _runtime()
+    try:
+        result = api.stop_recording() or {}
+        if result.get("error"):
+            raise AgentError("stop_failed", result["error"])
+        draft = (api.draft() or {}).get("draft") or {}
+        return {"recording": False, "steps": len(draft.get("steps") or []),
+                "dropped": draft.get("dropped", 0), "draft": draft,
+                "note": "已停止录制；草稿用 ra.edit_step / ra.move_step / ra.remove_step 剪辑，ra.save_draft 保存"}
+    finally:
+        _cleanup(api, owned)
+
+
+def _draft(input: dict) -> dict:
+    api, session, owned = _runtime()
+    try:
+        draft = (api.draft() or {}).get("draft") or {}
+        steps = [dict(step, label=step_label(step), index=index)
+                 for index, step in enumerate(draft.get("steps") or [], start=1)]
+        return {"steps": steps, "problems": draft.get("problems") or [],
+                "start_url": draft.get("start_url", ""), "origin": draft.get("origin", ""),
+                "dropped": draft.get("dropped", 0),
+                "note": "这是当前草稿（未保存）"}
+    finally:
+        _cleanup(api, owned)
+
+
+def _edit_step(input: dict) -> dict:
+    step_id = str(input.get("step_id") or "").strip()
+    patch = input.get("patch")
+    if not step_id:
+        raise AgentError("bad_input", "缺少必填参数：step_id（草稿里的步骤 id）")
+    if not isinstance(patch, dict) or not patch:
+        raise AgentError("bad_input",
+                         "patch 必须是非空对象，例如 {\"target\": {\"locators\": [...]}} 或 {\"expected\": {...}}")
+    _require_confirm(input, "修改当前草稿里的一个步骤")
+    api, session, owned = _runtime()
+    try:
+        result = api.edit_step(step_id, patch) or {}
+        if result.get("error"):
+            raise AgentError("bad_input", result["error"])
+        draft = (api.draft() or {}).get("draft") or {}
+        return {"edited": step_id, "steps": len(draft.get("steps") or []), "draft": draft,
+                "note": "改的是草稿，不是已保存的工作流；保存用 ra.save_draft"}
+    finally:
+        _cleanup(api, owned)
+
+
+def _move_step(input: dict) -> dict:
+    step_id = str(input.get("step_id") or "").strip()
+    if not step_id:
+        raise AgentError("bad_input", "缺少必填参数：step_id")
+    _require_confirm(input, "调整草稿里步骤的顺序")
+    api, session, owned = _runtime()
+    try:
+        draft = (api.draft() or {}).get("draft") or {}
+        current = [step.get("id") for step in draft.get("steps") or []]
+        if step_id not in current:
+            raise AgentError("not_found", f"草稿里没有步骤 {step_id}；现有：" + ", ".join(current))
+        if input.get("to_index") is not None:
+            offset = int(input["to_index"]) - current.index(step_id)
+        else:
+            offset = int(input.get("offset") if input.get("offset") is not None else -1)
+        result = api.move_step(step_id, offset) or {}
+        if isinstance(result, dict) and result.get("error"):
+            raise AgentError("bad_input", result["error"])
+        draft = (api.draft() or {}).get("draft") or {}
+        return {"moved": step_id, "order": [step.get("id") for step in draft.get("steps") or []]}
+    finally:
+        _cleanup(api, owned)
+
+
+def _remove_step(input: dict) -> dict:
+    step_id = str(input.get("step_id") or "").strip()
+    if not step_id:
+        raise AgentError("bad_input", "缺少必填参数：step_id")
+    _require_confirm(input, f"从草稿里删掉步骤 {step_id}")
+    api, session, owned = _runtime()
+    try:
+        result = api.remove_step(step_id) or {}
+        if isinstance(result, dict) and result.get("error"):
+            raise AgentError("bad_input", result["error"])
+        draft = (api.draft() or {}).get("draft") or {}
+        return {"removed": step_id, "steps": len(draft.get("steps") or []),
+                "order": [step.get("id") for step in draft.get("steps") or []]}
+    finally:
+        _cleanup(api, owned)
+
+
+def _add_step(input: dict) -> dict:
+    _require_confirm(input, "往草稿里追加一个步骤")
+    api, session, owned = _runtime()
+    try:
+        action = str(input.get("action") or "wait_for")
+        draft = (api.draft() or {}).get("draft") or {}
+        if action == "wait_for":
+            result = api.add_wait_step() or {}
+        else:
+            built = (api.draft() or {}).get("draft") or {}
+            step = {"id": str(input.get("id") or f"s{len(built.get('steps') or []) + 1}"),
+                    "action": action, "target": input.get("target") or {},
+                    "timeout_s": float(input.get("timeout_s") or 10.0)}
+            text = input.get("text") if input.get("text") is not None else input.get("value")
+            if text is not None:
+                step["text"] = str(text)
+            if input.get("secret_ref"):
+                step["secret_ref"] = input["secret_ref"]
+            if input.get("expected"):
+                step["expected"] = input["expected"]
+            appended = dict(built, steps=list(built.get("steps") or []) + [step])
+            if hasattr(api.session, "load_draft"):
+                result = api.session.load_draft(appended)
+            else:
+                result = {"error": "当前会话不支持追加任意动作：改用 ra.save_workflow 写完整定义"}
+        if isinstance(result, dict) and result.get("error"):
+            raise AgentError("bad_input", result["error"])
+        built = (api.draft() or {}).get("draft") or {}
+        return {"added": True, "action": action, "steps": len(built.get("steps") or []),
+                "order": [step.get("id") for step in built.get("steps") or []]}
+    finally:
+        _cleanup(api, owned)
+
+
+def _save_draft(input: dict) -> dict:
+    _require_confirm(input, "把当前草稿校验后保存为本机工作流")
+    api, session, owned = _runtime()
+    try:
+        workflow_id = str(input.get("workflow_id") or "")
+        name = str(input.get("name") or "")
+        built = api.preview_workflow(workflow_id, name) or {}
+        if built.get("error"):
+            raise AgentError("bad_input", built["error"])
+        problems = (built.get("check") or {}).get("blocking") or (built.get("problems") or [])
+        if problems:
+            raise AgentError("bad_input", "草稿还有阻塞项：" + "；".join(problems[:5]))
+        payload = dict(built.get("workflow") or {})
+        if workflow_id:
+            payload["id"] = workflow_id
+        if name:
+            payload["name"] = name
+        saved = api.save_workflow(payload) or {}
+        if saved.get("error"):
+            raise AgentError("bad_input", saved["error"])
+        return {"saved": True, "id": saved.get("id"), "steps": len(payload.get("steps") or []),
+                "needs_secret": saved.get("needs_secret") or [],
+                "warnings": (saved.get("check") or {}).get("warnings") or [],
+                "file": str(data_root() / "workflows" / f"{saved.get('id')}.workflow.json"),
+                "note": "needs_secret 非空时运行会被拦下，先 ra.set_secret 补值"}
+    finally:
+        _cleanup(api, owned)
+
+
+def _run_status(input: dict) -> dict:
+    run_id = str(input.get("run_id") or "").strip()
+    if not run_id:
+        raise AgentError("bad_input", "缺少必填参数：run_id")
+    api, session, owned = _runtime()
+    try:
+        status = (api.run_status(run_id) or {}).get("run") or {}
+        detail = (api.run_detail(run_id) or {}).get("detail") or {}
+        timeline = detail.get("timeline") or []
+        return {"run_id": run_id, "status": status.get("status") or detail.get("status") or "unknown",
+                "running": (status.get("status") or "") == "running",
+                "step_id": detail.get("step_id", ""), "code": detail.get("code", ""),
+                "steps_total": detail.get("steps_total", 0), "steps_run": detail.get("steps_run", 0),
+                "duration_s": detail.get("duration_s", 0),
+                "timeline": timeline[:MAX_TIMELINE], "timeline_truncated": len(timeline) > MAX_TIMELINE,
+                "resumable": detail.get("resumable", False), "uncertain": detail.get("uncertain", False),
+                "note": "running 时继续轮询；failed/cancelled 且 resumable 时可用 ra.run_workflow 的 from_step 续跑"}
+    finally:
+        _cleanup(api, owned)
+
+
+def _cancel_run(input: dict) -> dict:
+    _require_confirm(input, "给正在运行的回放发出停止请求（停在当前步骤，不自动重试）")
+    api, session, owned = _runtime()
+    try:
+        result = api.cancel_run() or {}
+        if isinstance(result, dict) and result.get("error"):
+            raise AgentError("cancel_failed", result["error"])
+        return {"cancelled": True, "state": (api.state() or {}),
+                "note": "停止在当前动作返回之后生效；已发出的动作不会被重发"}
+    finally:
+        _cleanup(api, owned)
+
+
+NEW_TOOLS = [
+    {"name": "ra.workflow_schema", "risk": "read", "handler": _schema,
+     "description": "取回 Workflow v1 的 JSON Schema、动作与定位器目录、可跑的最小示例，以及保存前双层校验"
+                    "的全部规则和结果分类含义。写工作流前先调这个，不用读源码。",
+     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "ra.app_state", "risk": "read", "handler": _app_state,
+     "description": "读当前会话状态机（idle/recording/review/running）、草稿步数与阻塞项、界面窗口的实测形态"
+                    "（模式、标题条是否已顶出屏幕、内容矩形）。",
+     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "ra.record_start", "risk": "exec", "handler": _record_start,
+     "description": "打开受控浏览器并开始录制（需要 confirm:true）。之后由人在浏览器里操作，用 ra.draft 读候选事件。",
+     "input_schema": {"type": "object", "properties": {
+         "url": {"type": "string", "description": "要录制的页面地址"},
+         "confirm": {"type": "boolean", "description": "必须为 true"}},
+         "required": ["url", "confirm"], "additionalProperties": False}},
+    {"name": "ra.record_stop", "risk": "exec", "handler": _record_stop,
+     "description": "结束录制并把整理好的草稿返回（步骤、丢弃计数、问题列表）。",
+     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "ra.draft", "risk": "read", "handler": _draft,
+     "description": "读当前草稿：每步的编号、id、动作、目标定位器与匹配情况、还缺什么。不写盘。",
+     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "ra.edit_step", "risk": "write", "handler": _edit_step,
+     "description": "剪辑草稿里的一个步骤（换定位器、补完成条件 expected、改 value/secret_ref/timeout_s）。"
+                    "需要 confirm:true。",
+     "input_schema": {"type": "object", "properties": {
+         "step_id": {"type": "string"}, "patch": {"type": "object"},
+         "confirm": {"type": "boolean"}},
+         "required": ["step_id", "patch", "confirm"], "additionalProperties": False}},
+    {"name": "ra.move_step", "risk": "write", "handler": _move_step,
+     "description": "调整草稿步骤顺序：offset（负数前移）或 to_index（0 基目标位置）。需要 confirm:true。",
+     "input_schema": {"type": "object", "properties": {
+         "step_id": {"type": "string"}, "offset": {"type": "integer"}, "to_index": {"type": "integer"},
+         "confirm": {"type": "boolean"}},
+         "required": ["step_id", "confirm"], "additionalProperties": False}},
+    {"name": "ra.remove_step", "risk": "write", "handler": _remove_step,
+     "description": "从草稿里删掉一个步骤。需要 confirm:true。",
+     "input_schema": {"type": "object", "properties": {
+         "step_id": {"type": "string"}, "confirm": {"type": "boolean"}},
+         "required": ["step_id", "confirm"], "additionalProperties": False}},
+    {"name": "ra.add_step", "risk": "write", "handler": _add_step,
+     "description": "往草稿追加步骤：action=wait_for 追加等待步；其他动作请改用 ra.save_workflow 写完整定义。"
+                    "需要 confirm:true。",
+     "input_schema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["wait_for", "click", "fill", "hotkey"]},
+         "id": {"type": "string"}, "target": {"type": "object"},
+         "text": {"type": "string", "description": "fill 要写进去的普通文本（秘密值改用 secret_ref）"},
+         "secret_ref": {"type": "string"}, "expected": {"type": "object"},
+         "timeout_s": {"type": "number"}, "confirm": {"type": "boolean"}},
+         "required": ["confirm"], "additionalProperties": False}},
+    {"name": "ra.save_draft", "risk": "write", "handler": _save_draft,
+     "description": "把当前草稿过一遍保存前校验并写成本机工作流。有阻塞项直接返回原因，不会写坏文件。"
+                    "需要 confirm:true。",
+     "input_schema": {"type": "object", "properties": {
+         "workflow_id": {"type": "string", "description": "可选：保存用的 id，缺省沿用草稿自己的 id"},
+         "name": {"type": "string", "description": "可选：界面显示名"},
+         "confirm": {"type": "boolean"}},
+         "required": ["confirm"], "additionalProperties": False}},
+    {"name": "ra.run_status", "risk": "read", "handler": _run_status,
+     "description": "轮询一次运行的实时状态：status / running / 停在哪一步 / 时间线 / 是否可续跑。"
+                    "配合 ra.run_workflow 的 wait_s:0 使用。",
+     "input_schema": {"type": "object", "properties": {"run_id": {"type": "string"}},
+                      "required": ["run_id"], "additionalProperties": False}},
+    {"name": "ra.cancel_run", "risk": "exec", "handler": _cancel_run,
+     "description": "给正在运行的回放发停止请求（人工决定，不是自动重试）。需要 confirm:true。",
+     "input_schema": {"type": "object", "properties": {"confirm": {"type": "boolean"}},
+                      "required": ["confirm"], "additionalProperties": False}},
+    {"name": "ra.delete_workflow", "risk": "write", "handler": _delete_workflow,
+     "description": "删除本机一个工作流定义（运行日志保留）。需要 confirm:true 并显式给出 workflow_id。",
+     "input_schema": {"type": "object", "properties": {
+         "workflow_id": {"type": "string"}, "confirm": {"type": "boolean"}},
+         "required": ["workflow_id", "confirm"], "additionalProperties": False}},
+    {"name": "ra.set_secret", "risk": "write", "handler": _set_secret,
+     "description": "给秘密引用赋值：用当前 Windows 账户加密写进本机 secrets.json。返回值只有引用名和长度，"
+                    "永不回显值。需要 confirm:true。",
+     "input_schema": {"type": "object", "properties": {
+         "ref": {"type": "string"}, "value": {"type": "string"}, "confirm": {"type": "boolean"}},
+         "required": ["ref", "value", "confirm"], "additionalProperties": False}},
+    {"name": "ra.delete_secret", "risk": "write", "handler": _delete_secret,
+     "description": "删除一个秘密引用。用到它的工作流会在打开浏览器之前被拦下并列出引用名。需要 confirm:true。",
+     "input_schema": {"type": "object", "properties": {
+         "ref": {"type": "string"}, "confirm": {"type": "boolean"}},
+         "required": ["ref", "confirm"], "additionalProperties": False}},
+]
+
+TOOLS += NEW_TOOLS
+
+
+def _window_state(input: dict) -> dict:
+    api, session, owned = _runtime()
+    try:
+        state = api.win_state() or {}
+        return {key: state.get(key) for key in (
+            "mode", "docked", "maximized", "fullscreen", "frameless", "titlebar_hidden", "strip", "insets",
+            "content", "rect", "client", "viewport", "monitor", "work", "caption", "hwnd", "cdp",
+            "supported", "place_error", "asked", "band_bottom", "work_top",
+                    "debug", "pixel_ok", "calibrated", "via")}             if state.get("mode") is not None or state.get("supported") is not None else {"error": "没有窗口可测"}
+    finally:
+        _cleanup(api, owned)
+
+
+def _window_mode(input: dict) -> dict:
+    mode = str(input.get("mode") or "")
+    _require_confirm(input, f"把界面窗口切成 {mode or '?'} 模式")
+    api, session, owned = _runtime()
+    try:
+        result = api.win_mode(mode) or {}
+        if not result.get("ok"):
+            raise AgentError("mode_refused", result.get("error") or "切换失败")
+        return result
+    finally:
+        _cleanup(api, owned)
+
+
+TOOLS += [
+    {"name": "ra.window_state", "risk": "read", "handler": _window_state,
+     "description": "读界面窗口的实测形态：模式、Chromium 自绘标题条高度、内容矩形、窗口矩形、工作区、"
+                    "标题条是否已被顶出屏幕，以及摆放失败时的原因。",
+     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "ra.window_mode", "risk": "write", "handler": _window_mode,
+     "description": "切换界面窗口形态：docked（停靠无边框）/ free（自由窗口，会露出浏览器标题条）/ fullscreen。"
+                    "需要 confirm:true。",
+     "input_schema": {"type": "object", "properties": {
+         "mode": {"type": "string", "enum": ["docked", "free", "fullscreen"]},
+         "confirm": {"type": "boolean"}},
+         "required": ["mode", "confirm"], "additionalProperties": False}},
 ]

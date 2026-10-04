@@ -22,8 +22,11 @@
       <button class="wbtn" id="win-min" title="最小化" aria-label="最小化">
         <svg width="11" height="11" viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.2"></path></svg>
       </button>
-      <button class="wbtn" id="win-max" title="改成窗口模式（会露出浏览器标题栏）" aria-label="改成窗口模式">
+      <button class="wbtn" id="win-max" title="铺满屏幕工作区" aria-label="铺满屏幕工作区">
         <svg width="11" height="11" viewBox="0 0 12 12"><rect x="2.4" y="2.4" width="7.2" height="7.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"></rect></svg>
+      </button>
+      <button class="wbtn" id="win-full" title="占满整块显示器（全屏）" aria-label="占满整块显示器">
+        <svg width="11" height="11" viewBox="0 0 12 12"><path d="M2.2 4.6V2.2h2.4M7.4 2.2h2.4v2.4M9.8 7.4v2.4H7.4M4.6 9.8H2.2V7.4" fill="none" stroke="currentColor" stroke-width="1.2"></path></svg>
       </button>
       <button class="wbtn close" id="win-close" title="关闭" aria-label="关闭">
         <svg width="11" height="11" viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.2"></path></svg>
@@ -40,7 +43,7 @@
       </span>
       <div>
         <h1>录放台</h1>
-        <p class="sub">REC · REPLAY</p>
+        <p class="sub" id="ver-chip" title="版本号 · 源码或封装版 · 界面资源是否比代码新">REC · REPLAY</p>
       </div>
     </div>
 
@@ -57,6 +60,10 @@
       <button class="nav-item" data-view="secrets">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="10" width="16" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
         秘密库 <span class="count" id="nav-secrets">0</span>
+      </button>
+      <button class="nav-item" data-view="agent">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 8 3 12l4 4"></path><path d="m17 8 4 4-4 4"></path><path d="M14 4 10 20"></path></svg>
+        Agent 接口 <span class="count" id="nav-agent">—</span>
       </button>
       <button class="nav-item" data-view="settings">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M12 3v2m0 14v2m9-9h-2M5 12H3m14.5-6.5-1.4 1.4M7.9 16.1l-1.4 1.4m11 0-1.4-1.4M7.9 7.9 6.5 6.5"></path></svg>
@@ -91,6 +98,8 @@
       </div>
 
       <div class="stats" id="deck-stats"></div>
+
+      <section class="card onboarding" id="onboarding" hidden></section>
 
       <section class="card composer">
         <div class="composer-head">
@@ -275,6 +284,42 @@
       </footer>
     </section>
 
+    <!-- Agent 接口 -->
+    <section class="view scroll" id="view-agent" hidden>
+      <div class="main-head">
+        <p class="eyebrow">AGENT · <span class="dim">接口</span></p>
+        <div class="head-row">
+          <h2 class="page-title">Agent 接口</h2>
+          <div class="actions"><button class="btn small" id="agent-refresh">刷新</button>
+            <button class="btn small" id="agent-probe">自检一次调用</button></div>
+        </div>
+        <p class="page-sub">这个程序本身就是「给 Agent 用」的后端：Agent 不用读源码，就能把工作流库当成一组带
+          schema 的工具来调用——列工作流、写工作流、剪辑步骤、真跑一次、读结果。下面就是当前正在运行的服务。</p>
+      </div>
+      <div class="stats" id="agent-stats"></div>
+      <section class="card agent-card" id="agent-endpoint"></section>
+      <section class="card agent-card">
+        <div class="card-t">工具清单<span class="n" id="agent-tool-count"></span></div>
+        <p class="s">risk：<b>read</b> 只读；<b>write</b> 会写本机文件；<b>exec</b> 会真的开浏览器操作页面。
+          write / exec 一律要在 input 里显式传 <span class="k">confirm:true</span>，缺了就返回 bad_input。</p>
+        <div class="tool-head"><span>档位</span><span>工具名</span><span>做什么</span><span>入参</span></div>
+        <div id="agent-tools"></div>
+      </section>
+      <section class="card agent-card">
+        <div class="card-t">怎么接</div>
+        <p class="s">HTTP 直接可用；MCP 桥给支持 MCP 的客户端（stdio）。两者调用的是同一个进程里的同一套能力。</p>
+        <div class="snippet-head"><span class="fn">HTTP · curl</span><button class="btn small cp" id="agent-copy-http">复制</button></div>
+        <pre class="code mono" id="agent-curl"></pre>
+        <div class="snippet-head"><span class="fn">MCP · 配置片段</span><button class="btn small cp" id="agent-copy-mcp">复制</button></div>
+        <pre class="code mono" id="agent-mcp"></pre>
+      </section>
+      <footer class="safety">
+        <span>只监听 <b>127.0.0.1</b>，不对外网开放</span><span class="sep"></span>
+        <span>秘密值<b>永不</b>出现在工具返回里</span><span class="sep"></span>
+        <span>Agent 与界面<b>同一个会话</b>：它跑的每一步界面上都看得见</span>
+      </footer>
+    </section>
+
     <!-- 运行历史 -->
     <section class="view scroll" id="view-history" hidden>
       <div class="main-head">
@@ -326,6 +371,19 @@
           <div class="val"><button class="switch" id="set-keep"><span class="track"><i></i></span><span class="txt">开启</span></button></div>
         </div>
         <div class="card set-row">
+          <div class="lab"><p class="t">界面窗口形态</p>
+            <p class="d"><b>停靠无边框</b>（默认）：窗口贴住屏幕顶边，把浏览器自带的标题条顶到屏幕外。<br>
+            <b>自由窗口</b>：能拖到任意位置，代价是顶部露出浏览器标题条。<b>全屏</b>：占满整块显示器。</p></div>
+          <div class="val seg" id="set-winmode">
+            <button data-mode="docked">停靠无边框</button><button data-mode="free">自由窗口</button><button data-mode="fullscreen">全屏</button>
+          </div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">当前窗口实测</p><p class="d" id="win-line">—</p>
+            <p class="d mono" id="win-geom"></p></div>
+          <div class="val"><button class="btn small" id="set-winrefresh">重新测量</button></div>
+        </div>
+        <div class="card set-row">
           <div class="lab"><p class="t">浏览器代理</p><p class="d">留空则跟随系统；可填 http://host:port</p></div>
           <div class="val"><input type="text" id="set-proxy" placeholder="留空 = 系统设置"></div>
         </div>
@@ -362,6 +420,15 @@
           </div>
         </div>
         <div class="card set-row">
+          <div class="lab"><p class="t">Agent 接口</p><p class="d">程序自己就是给 Agent 用的后端：只监听 127.0.0.1。关掉后界面照常可用，只是 Agent 调不到。</p></div>
+          <div class="val"><button class="switch" id="set-agent"><span class="track"><i></i></span><span class="txt">开启</span></button>
+            <span class="chip mono" id="agent-port-line">—</span></div>
+        </div>
+        <div class="card set-row">
+          <div class="lab"><p class="t">上手引导</p><p class="d">工作台顶部那三步说明，收起了可以随时再打开</p></div>
+          <div class="val"><button class="btn small" id="set-onboarding">重新显示</button></div>
+        </div>
+        <div class="card set-row">
           <div class="lab"><p class="t">版本</p><p class="d" id="about-line">—</p></div>
           <div class="val"><button class="btn" id="set-selfcheck">运行端到端自检</button></div>
         </div>
@@ -369,6 +436,11 @@
     </section>
   </main>
 </div>
+</div>
+
+<div class="grips" id="grips" aria-hidden="true">
+  <i id="gn"></i><i id="gw"></i><i id="ge"></i><i id="gs"></i>
+  <i id="gnw"></i><i id="gne"></i><i id="gsw"></i><i id="gse"></i>
 </div>
 
 <div class="modal" id="modal" hidden>

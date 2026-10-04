@@ -39,23 +39,39 @@ async function ensureBase() {
       if (r.ok) return base;
     } catch { /* 继续尝试 */ }
   }
-  // 自动拉起：约定 agent/launch.json = {"command":"node","args":["agent/server.mjs"],"ready_port":8791}
+  // 自动拉起：agent/launch.json 里按顺序登记可用的启动方式。
+  // 界面程序自己就带这个服务（同一个进程），所以只要录放台开着，这里通常轮不到拉起。
   const launchFile = path.join(__dirname, 'launch.json');
-  if (!existsSync(launchFile)) throw new Error(`Agent 服务未启动且缺少 ${launchFile}；请先运行 npm run agent:serve`);
+  if (!existsSync(launchFile)) throw new Error(`Agent 服务未启动且缺少 ${launchFile}`);
   const spec = JSON.parse(readFileSync(launchFile, 'utf8'));
-  const child = spawn(spec.command, spec.args, { cwd: PROJECT_ROOT, stdio: 'ignore', detached: true, shell: false });
-  child.unref();
+  const commands = spec.commands || [{ argv: [spec.command, ...(spec.args || [])] }];
   const port = spec.ready_port || 8790;
-  for (let i = 0; i < 60; i++) {
-    await new Promise((r) => setTimeout(r, 500));
+  const probe = async () => {
     for (let p = port; p < port + 12; p++) {
       try {
         const r = await fetch(`http://127.0.0.1:${p}/api/health`, { signal: AbortSignal.timeout(800) });
         if (r.ok) return `http://127.0.0.1:${p}`;
       } catch { /* 未就绪 */ }
     }
+    return null;
+  };
+  const notes = [];
+  for (const item of commands) {
+    const [cmd, ...args] = item.argv || [];
+    if (!cmd) continue;
+    try {
+      const child = spawn(cmd, args, { cwd: PROJECT_ROOT, stdio: 'ignore', detached: true, shell: false });
+      child.on('error', (e) => notes.push(`${cmd}: ${e.message}`));
+      child.unref();
+    } catch (e) { notes.push(`${cmd}: ${e.message}`); continue; }
+    for (let i = 0; i < 40; i++) {           // 每种拉起方式最多等 20 秒，再换下一种
+      await new Promise((r) => setTimeout(r, 500));
+      const base = await probe();
+      if (base) return base;
+    }
+    notes.push(`${item.note || cmd} 未在 20 秒内就绪`);
   }
-  throw new Error('自动拉起 Agent 服务超时（30s）');
+  throw new Error('自动拉起 Agent 服务失败：' + notes.join('；') + '。也可以直接打开录放台，它自己就提供这个接口。');
 }
 
 let BASE = null;

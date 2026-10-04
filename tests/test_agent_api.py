@@ -51,10 +51,19 @@ class ToolRegistryTests(unittest.TestCase):
 
     def test_project_identity_and_prefix(self):
         self.assertEqual(self.tools.PROJECT["name"], "recorded-automation")
-        self.assertTrue(self.names(), True)
         self.assertTrue(all(name.startswith("ra.") for name in self.names()), self.names())
-        self.assertGreaterEqual(len(self.names()), 4)
-        self.assertLessEqual(len(self.names()), 8)
+        self.assertGreaterEqual(len(self.names()), 20, "交付版要覆盖界面能做的每一件事")
+        self.assertEqual(len(self.names()), len(set(self.names())), "工具名不能重复")
+
+    def test_every_tool_is_documented_enough_for_an_agent_to_call_blind(self):
+        for tool in self.tools.TOOLS:
+            self.assertTrue(len(tool["description"]) >= 20, tool["name"])
+            self.assertIn(tool.get("risk"), {"read", "write", "exec"}, tool["name"])
+            schema = tool.get("input_schema")
+            self.assertIsInstance(schema, dict, tool["name"])
+            if schema.get("required"):
+                for key in schema["required"]:
+                    self.assertIn(key, schema.get("properties", {}), f"{tool['name']} 要求 {key} 却没写它的说明")
 
     def test_agent_error_class_is_shared_with_the_server(self):
         # importlib 二次加载会让 AgentError 变成两个类对象，server 就捕不到 handler 抛的错。
@@ -64,14 +73,21 @@ class ToolRegistryTests(unittest.TestCase):
         risks = {tool["name"]: tool["risk"] for tool in self.tools.TOOLS}
         self.assertEqual(risks["ra.save_workflow"], "write")
         self.assertEqual(risks["ra.run_workflow"], "exec")
+        self.assertEqual(risks["ra.record_start"], "exec")
+        self.assertEqual(risks["ra.delete_workflow"], "write")
+        self.assertEqual(risks["ra.set_secret"], "write")
         for name in ("ra.status", "ra.list_workflows", "ra.get_workflow", "ra.validate_workflow",
-                     "ra.run_history", "ra.list_secret_refs"):
+                     "ra.run_history", "ra.list_secret_refs", "ra.workflow_schema", "ra.app_state",
+                     "ra.draft", "ra.run_status"):
             self.assertEqual(risks[name], "read", name)
 
-    def test_destructive_actions_are_not_exposed(self):
-        joined = " ".join(self.names())
-        for forbidden in ("delete", "reset", "clear", "shutdown"):
-            self.assertNotIn(forbidden, joined.lower())
+    def test_destructive_tools_exist_but_each_one_demands_confirm(self):
+        """交付版把界面能做的都开放给 Agent：删除类也在内，但每一个都必须显式 confirm:true。"""
+        for name in ("ra.delete_workflow", "ra.set_secret", "ra.delete_secret", "ra.cancel_run",
+                     "ra.save_workflow", "ra.run_workflow", "ra.record_start", "ra.edit_step",
+                     "ra.move_step", "ra.remove_step", "ra.add_step", "ra.save_draft"):
+            tool = self.by_name(name)
+            self.assertIn("confirm", tool["input_schema"].get("required", []), name)
 
     def test_write_and_exec_need_explicit_confirm(self):
         payload = {"schema_version": 1, "id": "wf_probe", "origin": "https://example.test",

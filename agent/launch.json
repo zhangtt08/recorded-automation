@@ -1,5 +1,18 @@
 {
-  "command": "C:\\Program Files\\Python312\\python.exe",
-  "args": ["agent/server.py"],
-  "ready_port": 8795
+  "ready_port": 8795,
+  "commands": [
+    {
+      "argv": [
+        "python",
+        "agent/server.py"
+      ],
+      "note": "本机 Python 起的独立服务（源码运行）"
+    },
+    {
+      "argv": [
+        "录放台.exe"
+      ],
+      "note": "封装版：直接拉起桌面程序，Agent 接口与界面同一个进程"
+    }
+  ]
 }

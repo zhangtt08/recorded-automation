@@ -86,7 +86,7 @@ body.frameless .app { height: calc(100vh - 40px); }
 .tb-status .pill.rec { background: var(--accent-bg); border-color: rgba(234, 90, 36, .32); color: var(--accent-dim); font-weight: 600; }
 .tb-status .pill.run { background: var(--info-bg); border-color: rgba(53, 111, 180, .3); color: var(--info); font-weight: 600; }
 .tb-hint { font-size: 10.5px; color: var(--ink3); margin-left: 10px; }
-.wbtns { display: flex; align-items: stretch; height: 40px; margin-left: auto; }
+.wbtns { display: flex; align-items: stretch; height: 40px; margin-left: auto; position: relative; z-index: 120; }
 .wbtn {
   width: 46px; height: 40px; border: 0; background: transparent; color: var(--ink2);
   display: grid; place-items: center; border-radius: 0; transition: background .12s ease, color .12s ease;
@@ -99,6 +99,10 @@ body.frameless .app { height: calc(100vh - 40px); }
 .main { display: flex; flex-direction: column; min-width: 0; position: relative; }
 .view { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .view.scroll { overflow-y: auto; }
+/* 关键：.view 是纵向 flex，默认会让每个子项被压扁（flex-shrink:1）。
+   压扁后卡片内容溢出到下一张卡片上面，按钮看着在、实际被盖住点不到。
+   内容必须按自然高度排，超出就整屏滚动。 */
+.view.scroll > * { flex: none; }
 
 /* ---------- 侧栏 ---------- */
 .nav {
@@ -203,7 +207,7 @@ body.frameless .app { height: calc(100vh - 40px); }
 
 .main-head { padding: 26px 34px 0; animation: riseIn .22s ease; }
 .eyebrow { font-family: var(--font-mono); font-size: 10px; letter-spacing: 2px; color: var(--ink3); text-transform: uppercase; }
-.eyebrow .dim { color: var(--accent); }
+.eyebrow .dim { color: var(--accent); letter-spacing: .5px; font-family: var(--font-ui); font-size: 11px; }
 h2.page-title { font-size: 23px; font-weight: 700; letter-spacing: .3px; margin-top: 6px; }
 .page-sub { color: var(--ink2); font-size: 12.5px; margin-top: 6px; }
 .head-row { display: flex; align-items: flex-end; gap: 14px; }
@@ -220,6 +224,14 @@ h2.page-title { font-size: 23px; font-weight: 700; letter-spacing: .3px; margin-
 .empty { padding: 36px 30px; color: var(--ink3); font-size: 12.5px; text-align: center; }
 .empty .big { font-size: 14.5px; color: var(--ink2); font-weight: 650; margin-bottom: 7px; }
 .empty svg { display: block; margin: 0 auto 14px; color: #C3CCD6; }
+
+/* 某一屏没读到数据：必须说出来并给一个真的能用的出口，不能留一片空白 */
+.loadfail {
+  display: flex; align-items: center; gap: 10px; margin: 14px 34px 0; padding: 11px 14px;
+  border-color: rgba(196, 61, 46, .38); background: #FFF7F5;
+}
+.loadfail .t { font-size: 12.5px; font-weight: 700; color: var(--bad); }
+.loadfail .d { font-size: 11.5px; color: var(--ink2); flex: 1; min-width: 0; }
 
 /* ---------- 工作台 ---------- */
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 20px 34px 0; }
@@ -469,9 +481,9 @@ h2.page-title { font-size: 23px; font-weight: 700; letter-spacing: .3px; margin-
 .table .ref { font-family: var(--font-mono); font-size: 11.5px; width: 260px; flex: none; }
 .table .len { font-size: 11px; color: var(--ink3); width: 110px; }
 .table .row input { flex: 1; height: 30px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; font-family: var(--font-mono); background: var(--panel); }
-.set-grid { padding: 22px 34px; display: flex; flex-direction: column; gap: 12px; max-width: 940px; }
+.set-grid { padding: 22px 34px 30px; display: flex; flex-direction: column; gap: 12px; max-width: 940px; }
 .set-row { display: flex; align-items: center; gap: 14px; padding: 13px 16px; }
-.set-row .lab { width: 250px; flex: none; }
+.set-row .lab { width: 286px; flex: none; }
 .set-row .lab .t { font-size: 12.5px; font-weight: 600; }
 .set-row .lab .d { font-size: 11px; color: var(--ink3); margin-top: 3px; }
 .set-row .val { margin-left: auto; display: flex; align-items: center; gap: 9px; }
@@ -508,3 +520,98 @@ h2.page-title { font-size: 23px; font-weight: 700; letter-spacing: .3px; margin-
   .lamp.rec, .caret, .caret-i, .dots-typing i, .shot .scan, .modal, .toast { animation: none; }
   .btn:active { transform: none; }
 }
+
+/* ---------- 无边框窗口的缩放手势与分段选择 ---------- */
+/* Chromium 自绘的标题条被顶到屏幕外之后，窗口的四条边只能由界面自己接管。 */
+.grips { display: none; }
+body.frameless .grips { display: block; }
+body[data-win-mode="fullscreen"] .grips { display: none; }
+/* 只有把手本身接收鼠标，容器不能挡住下面的内容 */
+.grips { pointer-events: none; }
+.grips i { position: fixed; z-index: 95; pointer-events: auto; }
+#gw { left: 0; top: 0; width: 4px; height: 100vh; cursor: ew-resize; }
+#ge { right: 0; top: 0; width: 4px; height: 100vh; cursor: ew-resize; }
+#gs { left: 0; bottom: 0; width: 100vw; height: 4px; cursor: ns-resize; }
+#gn { left: 0; top: 0; width: 100vw; height: 3px; cursor: ns-resize; }
+#gsw { left: 0; bottom: 0; width: 11px; height: 11px; cursor: nesw-resize; }
+#gse { right: 0; bottom: 0; width: 11px; height: 11px; cursor: nwse-resize; }
+#gnw { left: 0; top: 0; width: 11px; height: 11px; cursor: nwse-resize; }
+#gne { right: 0; top: 0; width: 11px; height: 11px; cursor: nesw-resize; }
+
+/* 无边框时窗口没有系统描边：用一圈极淡的内描边把窗口边界读出来 */
+body.frameless .frame { box-shadow: inset 0 0 0 1px rgba(33, 40, 50, .10); }
+body.docked .titlebar { border-radius: 0; }
+
+.seg { display: inline-flex; gap: 0; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--panel2); }
+.seg button {
+  border: 0; background: transparent; color: var(--ink2); font: inherit; font-size: 11.5px;
+  padding: 6px 11px; cursor: pointer; border-right: 1px solid var(--line);
+}
+.seg button:last-child { border-right: 0; }
+.seg button:hover { background: var(--inset); color: var(--ink); }
+.seg button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+
+/* 自检标定条：窗口摆放是否精确，用屏幕像素反查这一条的颜色 */
+body[data-verify="1"]::before {
+  content: ""; position: fixed; left: 0; top: 0; width: 100%; height: 6px;
+  background: #EA5A24; z-index: 300; pointer-events: none;
+}
+
+/* ---------- 上手引导与 Agent 接口 ---------- */
+.onboarding { padding: 14px 16px 12px; background: linear-gradient(180deg, #FFFFFF, #FAFBFC); }
+.ob-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.ob-head .t { font-size: 12.5px; font-weight: 700; }
+.ob-head .mut { font-size: 11px; color: var(--ink3); }
+.ob-head button { margin-left: auto; }
+.ob-step { display: grid; grid-template-columns: 26px 1fr auto; gap: 10px; align-items: center;
+  padding: 8px 0; border-top: 1px dashed var(--line2); }
+.ob-step:first-of-type { border-top: 0; }
+.ob-n { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 11px;
+  background: var(--inset); color: var(--ink2); font-weight: 700; }
+.ob-step.done .ob-n { background: var(--ok-bg); color: var(--ok); }
+.ob-step.now .ob-n { background: var(--accent); color: #FFFFFF; }
+.ob-b .t { font-size: 12px; font-weight: 600; }
+.ob-b .d { font-size: 11px; color: var(--ink2); margin-top: 2px; }
+
+.agent-card { padding: 14px 16px; }
+.agent-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0 4px; }
+.agent-row .chip { font-size: 11.5px; }
+.snippet-head { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.snippet-head .fn { font-family: var(--font-mono); font-size: 11px; color: var(--ink2); }
+.snippet-head .cp { margin-left: auto; }
+.code { background: var(--panel2); border: 1px solid var(--line2); border-radius: var(--r-sm);
+  padding: 10px 12px; font-size: 11px; line-height: 1.55; color: var(--ink); white-space: pre-wrap;
+  word-break: break-all; margin: 6px 0 0; }
+.tool-row { display: grid; grid-template-columns: 52px 168px 1fr auto; gap: 10px; align-items: baseline;
+  padding: 7px 0; border-top: 1px solid var(--line2); font-size: 11.5px; }
+.tool-row:first-child { border-top: 0; }
+.tool-row .tn { font-size: 11.5px; font-weight: 600; color: var(--ink); }
+.tool-row .td { color: var(--ink2); }
+.tool-row .tp { font-family: var(--font-mono); font-size: 10px; color: var(--ink3); }
+.risk { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .4px; padding: 2px 6px;
+  border-radius: 5px; text-align: center; }
+.risk.read { background: var(--info-bg); color: var(--info); }
+.risk.write { background: var(--warn-bg); color: var(--warn); }
+.risk.exec { background: var(--bad-bg); color: var(--bad); }
+.s.bad { color: var(--bad); }
+
+/* ---------- v3 排版收口 ----------
+   这一段存在的原因：卡片正文用的 class="s" 以前没有独立规则（只有 .stat .s / .panel-head .s），
+   在 Agent 屏的卡片里就等于用默认字号、零内边距顶在边框上；现在补齐层级与留白。 */
+.s { font-size: 11.5px; color: var(--ink2); line-height: 1.65; margin-top: 6px; }
+.card > .card-t { margin-bottom: 1px; }
+.card > .card-t + .s { margin-top: 4px; }
+.agent-card { padding: 16px 18px; }
+.tool-head {
+  display: grid; grid-template-columns: 52px 172px 1fr auto; gap: 10px; align-items: baseline;
+  padding: 9px 0 7px; border-bottom: 1px solid var(--line); margin-top: 10px;
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--ink3);
+}
+.tool-row:hover { background: var(--panel2); }
+.tool-row { line-height: 1.6; padding: 9px 0; }
+.tool-row .tp { text-align: right; }
+.code { max-height: 172px; overflow: auto; }
+.stats { gap: 12px; }
+.stat .v { font-size: 20px; }
+.composer, .list-head, .stats, .table, .loadfail, .onboarding { scroll-margin-top: 16px; }
+.onboarding { margin: 14px 34px 0; }

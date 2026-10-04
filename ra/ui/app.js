@@ -14,61 +14,193 @@
   window.__raErrors = [];
   window.addEventListener("error", (event) => window.__raErrors.push(String(event.message || event.type)));
   window.addEventListener("unhandledrejection", (event) => window.__raErrors.push("rejected: " + String(event.reason)));
+  // 兜底：任何一条按钮的异步失败都要在界面上说出来。
+  // 以前有 4 个设置页按钮的处理器没有 catch，后端一拒绝就是「点了没反应」，用户什么也看不到。
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event.reason;
+    if (reason && reason.notified) return;                 // call() 已经提示过，不重复弹
+    const text = String((reason && reason.message) || reason || "未知错误");
+    window.__raErrors.push("按钮失败: " + text);
+    toast("这一步没有完成：" + text, "warn");
+  });
 
   const $ = (id) => document.getElementById(id);
   const esc = (value) => String(value === undefined || value === null ? "" : value)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-  // 一体化窗口：全屏时 Chromium 不画自己的标题栏，窗口控制全部由这里接管
+  // ---------- 一体化窗口：标题条与缩放手势都由界面自己画 ----------
+  // 后端会把 Chromium 自绘的那条标题条顶出屏幕（停靠模式）或进入全屏；两种情况下
+  // 界面上只有一条我们自绘的标题条。free 模式下浏览器标题条露出来，这条就隐藏。
   const ICON_RESTORE = '<svg width="11" height="11" viewBox="0 0 12 12"><rect x="1.8" y="3.6" width="6.4" height="6.4" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.1"></rect><path d="M3.8 3.4V2.2a1 1 0 0 1 1-1h4.2a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1H9.6" fill="none" stroke="currentColor" stroke-width="1.1"></path></svg>';
-  const ICON_EXPAND = '<svg width="11" height="11" viewBox="0 0 12 12"><rect x="2.4" y="2.4" width="7.2" height="7.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"></rect></svg>';
+  const ICON_MAX = '<svg width="11" height="11" viewBox="0 0 12 12"><rect x="2.4" y="2.4" width="7.2" height="7.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"></rect></svg>';
+  const ICON_FULL = '<svg width="11" height="11" viewBox="0 0 12 12"><path d="M2.2 4.6V2.2h2.4M7.4 2.2h2.4v2.4M9.8 7.4v2.4H7.4M4.6 9.8H2.2V7.4" fill="none" stroke="currentColor" stroke-width="1.2"></path></svg>';
+  const ICON_EXIT_FULL = '<svg width="11" height="11" viewBox="0 0 12 12"><path d="M4.8 2.2v2.6H2.2M9.8 4.8H7.2V2.2M7.2 9.8V7.2H9.8M2.2 7.2h2.6v2.6" fill="none" stroke="currentColor" stroke-width="1.2"></path></svg>';
 
-  function paintMaxButton() {
+  const MODE_TEXT = { docked: "停靠无边框", free: "自由窗口", fullscreen: "全屏" };
+
+  function paintWindowButtons() {
+    const full = S.frame && S.frame.mode === "fullscreen";
+    const maxed = !!(S.geom && S.geom.maximized);
+    const expand = $("win-full");
+    if (expand) {
+      expand.innerHTML = full ? ICON_EXIT_FULL : ICON_FULL;
+      expand.title = full ? "退出全屏" : "占满整块显示器（全屏）";
+      expand.setAttribute("aria-label", expand.title);
+    }
     const button = $("win-max");
-    if (!button) return;
-    const full = S.fullscreen !== false;
-    button.title = full ? "改成窗口模式（会露出浏览器标题栏）" : "改回全屏无边框";
-    button.setAttribute("aria-label", button.title);
-    button.innerHTML = full ? ICON_RESTORE : ICON_EXPAND;
+    if (button) {
+      button.innerHTML = maxed ? ICON_RESTORE : ICON_MAX;
+      button.title = maxed ? "还原窗口大小" : "铺满屏幕工作区";
+      button.setAttribute("aria-label", button.title);
+    }
+    const hint = $("tb-hint");
+    if (hint) {
+      const mode = (S.frame && S.frame.mode) || "";
+      hint.textContent = mode === "free" ? "浏览器标题条未隐藏"
+        : mode === "fullscreen" ? "全屏 · 无边框" : "无边框停靠 · 拖标题条左右移动、拖边缘改尺寸";
+    }
   }
 
   async function syncFrame(attempt) {
     try {
       const state = await call("win_state");
-      // 全屏 = 没有浏览器自带的标题栏 = 由我们自绘；窗口模式则把标题条让给浏览器
-      const showBar = !!(state && state.fullscreen);
-      document.body.classList.toggle("frameless", showBar);
-      S.frameless = !!(state && state.frameless);
-      S.fullscreen = showBar;
-      paintMaxButton();
-      if (showBar && !S.frameless && (attempt || 0) < 10) setTimeout(() => syncFrame((attempt || 0) + 1), 600);
+      S.frame = state;
+      S.geom = { x: (state.content || [])[0], y: (state.content || [])[1],
+                 w: (state.content || [])[2], h: (state.content || [])[3],
+                 maximized: !!state.maximized };
+      S.frameless = !!(state && (state.fullscreen || state.titlebar_hidden));
+      document.body.classList.toggle("frameless", S.frameless);
+      document.body.classList.toggle("docked", !!(state && state.docked));
+      document.body.dataset.winMode = (state && state.mode) || "";
+      window.__raFrame = { at: Date.now(), mode: state && state.mode, fullscreen: !!(state && state.fullscreen),
+                           titlebar_hidden: !!(state && state.titlebar_hidden), verified: S.frameless,
+                           strip: state && state.strip, content: state && state.content, state: state };
+      paintWindowButtons();
+      // 后端还没把标题条挪出屏幕时（首帧、引擎慢）再核对几次，不靠固定 sleep 下结论
+      if (state && state.docked && !state.titlebar_hidden && (attempt || 0) < 10) {
+        setTimeout(() => syncFrame((attempt || 0) + 1), 500);
+      }
     } catch (error) {
-      document.body.classList.remove("frameless");
+      document.body.classList.remove("frameless", "docked");
+      window.__raFrame = { at: Date.now(), error: String((error && error.message) || error) };
     }
   }
+  window.__raSyncFrame = () => { syncFrame(2); return true; };   // 后端切完窗口状态会点一下
 
   async function toggleMax() {
-    const result = await call("win_maximize");
-    S.fullscreen = !!(result && result.maximized);
-    paintMaxButton();
-    await syncFrame(6);          // 标题栏要跟着真实窗口状态出现或消失
-    if (result && result.state === "") toast("当前引擎不支持窗口切换", "warn");
+    const result = await guarded("win_maximize");
+    if (result && result.error) toast("没能改变窗口大小：" + result.error, "bad");
+    await syncFrame(6);
+  }
+
+  async function toggleFullscreen() {
+    const want = !(S.frame && S.frame.mode === "fullscreen");
+    let result = null;
+    try { result = await guarded("win_mode", want ? "fullscreen" : "docked"); }
+    catch (error) { result = { ok: false, error: String((error && error.message) || error) }; }
+    if (!result || !result.ok) {
+      toast("当前引擎不支持" + (want ? "全屏" : "切回停靠") + "：" + ((result && result.error) || "没有响应"), "warn");
+    }
+    await syncFrame(6);
+    if (S.view === "settings") refreshSettings().catch(() => { });
+  }
+
+  // 拖动标题条 = 移动窗口；停靠模式下上下拖 = 改高度（顶边钉在屏幕顶）
+  function startGesture(event, kind, edges) {
+    if (event.button !== 0) { window.__raGesture = { skipped: "button " + event.button }; return; }
+    const frame = S.frame || {};
+    const geom = { x: (frame.content || [])[0], y: (frame.content || [])[1],
+                   w: (frame.content || [])[2], h: (frame.content || [])[3] };
+    if (!geom.w) { window.__raGesture = { skipped: "没有内容矩形，S.frame 还没就绪" }; return; }
+    const start = { x: event.screenX, y: event.screenY };
+    window.__raGesture = { at: Date.now(), kind: kind, geom: geom.slice ? geom.slice() : geom,
+                           docked: !!(frame.docked), frameMode: frame.mode || "", moves: 0, sent: null };
+    const grab = { x: event.screenX - geom.x, y: event.screenY - geom.y };
+    const docked = !!frame.docked;
+    let pending = null, raf = 0, moved = false;
+    const send = (rect) => {
+      pending = rect;
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if (!pending) return;
+        const rect2 = pending; pending = null;
+        if (window.__raGesture) window.__raGesture.sent = rect2;
+        guarded("win_resize", [rect2[0], rect2[1], rect2[2], rect2[3]])
+          .then((r) => { moved = true; if (window.__raGesture) window.__raGesture.result = r && r.ok; })
+          .catch((error) => { if (window.__raGesture) window.__raGesture.error = String(error && error.message || error); });
+      });
+    };
+    const onMove = (e) => {
+      const dx = e.screenX - start.x, dy = e.screenY - start.y;
+      if (window.__raGesture) window.__raGesture.moves++;
+      if (kind === "move") {
+        // 停靠模式只改水平位置：同时改 x 与高度的边界请求会被 Chromium 回弹到上一次位置（实测）。
+        // 要改高度就拖下边缘，这也更符合「拖标题条 = 移动」的直觉。
+        send([geom.x + dx, docked ? geom.y : geom.y + dy, geom.w, geom.h]);
+      } else {
+        let [x, y, w, h] = geom;
+        if (edges.includes("w")) { x += dx; w -= dx; }
+        if (edges.includes("e")) { w += dx; }
+        if (edges.includes("n") && !docked) { y += dy; h -= dy; }
+        if (edges.includes("s")) { h += dy; }
+        if (w < 900) { if (edges.includes("w")) x -= (900 - w); w = 900; }
+        if (h < 420) { if (edges.includes("n") && !docked) y -= (420 - h); h = 420; }
+        send([x, y, w, h]);
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      if (raf) cancelAnimationFrame(raf);
+      guarded("win_gesture_end").then(() => { if (moved) syncFrame(2); });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    event.preventDefault();
   }
 
   function wireWindow() {
     const bar = $("titlebar");
-    bar.addEventListener("mousedown", (event) => {
-      if (event.button !== 0 || event.target.closest(".wbtn")) return;
-      if (event.detail === 2) return;                       // 双击交给 dblclick 处理
-      call("win_drag").catch(() => { });
+    let resizeTimer = 0;
+    window.addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => { syncFrame(2).catch(() => { }); }, 300);
+    });
+    setInterval(() => { syncFrame(0).catch(() => { }); }, 2500);
+    bar.addEventListener("pointerdown", (event) => {
+      if (event.target.closest(".wbtn") || event.target.closest("input,button,select")) return;
+      if (event.detail === 2) return;                       // 双击交给 dblclick
+      startGesture(event, "move");
     });
     bar.addEventListener("dblclick", (event) => {
       if (!event.target.closest(".wbtn")) toggleMax().catch(() => { });
     });
-    $("win-min").onclick = () => call("win_minimize").catch(() => { });
+    const grips = { gw: "ew-resize", ge: "ew-resize", gs: "ns-resize", gsw: "nesw-resize", gse: "nwse-resize",
+                    gn: "ns-resize", gnw: "nwse-resize", gne: "nesw-resize" };
+    Object.keys(grips).forEach((id) => {
+      const el = $(id);
+      if (!el) return;
+      el.style.cursor = grips[id];
+      el.addEventListener("pointerdown", (event) => startGesture(event, "resize", id.slice(1)));
+    });
+    $("win-min").onclick = () => guarded("win_minimize").catch((error) =>
+      toast("最小化没生效：" + ((error && error.message) || error), "warn"));
     $("win-max").onclick = () => toggleMax().catch(() => { });
-    $("win-close").onclick = () => call("win_close").catch(() => { });
-    paintMaxButton();
+    $("win-full").onclick = () => toggleFullscreen().catch(() => { });
+    $("win-close").onclick = () => confirmWindowClose();
+    paintWindowButtons();
+  }
+
+  async function confirmWindowClose() {
+    const busyNow = !!(S.recTimer || S.runTimer);
+    const ok = await ask("退出录放台？", busyNow
+      ? "当前正在录制或运行：退出会停在当前步骤，日志已记录到这里，之后不会自动续跑。"
+      : "工作流、运行记录和秘密库都已保存在本机，下次打开还在原处。");
+    if (!ok) return;
+    call("win_close").catch(() => { });
   }
 
   // ---------- bridge ----------
@@ -93,6 +225,7 @@
       else toast(result.error, "warn");
       const error = new Error(result.error);
       error.payload = result;                       // 结构化原因（例如缺哪些秘密引用名）
+      error.notified = true;                        // 上面已经 toast 过，兜底监听不要再弹一次
       throw error;
     }
     return result;
@@ -109,6 +242,24 @@
   function busy(on) {
     S.busy = on;
     $("busy-bar").classList.toggle("on", on);
+  }
+
+  // 剪贴板在窗口没有焦点时会被直接拒绝；先退到 execCommand，真不行才让用户在文本框里全选。
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (error) { /* 换下一条路 */ }
+    try {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.style.position = "fixed";
+      area.style.top = "-1000px";
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      area.remove();
+      return ok;
+    } catch (error) {
+      return false;
+    }
   }
 
   // 应用窗口内的确认框（不依赖原生 confirm，也不会被浏览器自动关掉）
@@ -177,6 +328,14 @@
     if (diff < 172800) return "昨天";
     return Math.floor(diff / 86400) + " 天前";
   };
+  // 运行 ID 现在是 MMDD + HHMMSS + 毫秒：日期在 id 里，历史列表才答得出「这次是哪天跑的」，
+  // 而不是只有一句看不出先后顺序的「3 小时前」。
+  const runStamp = (runId) => {
+    const text = String(runId || "");
+    if (text.length < 10) return text;
+    return text.slice(0, 2) + "-" + text.slice(2, 4) + " " + text.slice(4, 6) + ":" +
+      text.slice(6, 8) + ":" + text.slice(8, 10);
+  };
 
   const STATUS_LABEL = {
     completed: ["ok", "完成"], completed_unverified: ["info", "完成 · 未验证"],
@@ -190,7 +349,7 @@
   const ACTION_WORD = { click: "点击", fill: "填写", hotkey: "按键", wait_for: "等待", merge: "填写" };
   const VIEW_NAMES = {
     deck: "工作台", recording: "录制中", review: "审阅与编辑", run: "运行结果",
-    history: "运行历史", secrets: "秘密库", settings: "设置"
+    history: "运行历史", secrets: "秘密库", agent: "Agent 接口", settings: "设置"
   };
 
   const statusChip = (key, label) => {
@@ -202,7 +361,7 @@
   function show(view) {
     S.view = view;
     $("tb-view").textContent = VIEW_NAMES[view] || "";
-    ["deck", "recording", "review", "run", "history", "secrets", "settings"].forEach((name) => {
+    ["deck", "recording", "review", "run", "history", "secrets", "agent", "settings"].forEach((name) => {
       $("view-" + name).hidden = name !== view;
     });
     document.querySelectorAll(".nav-item[data-view]").forEach((item) => {
@@ -212,12 +371,32 @@
       else item.removeAttribute("aria-current");
     });
     stopTickers();
+    const stale = $("load-fail");
+    if (stale) stale.remove();
     if (view === "recording") startTickers();
-    if (view === "run" && S.currentRun) pollRun();
-    if (view === "deck") refreshDeck();
-    if (view === "history") refreshHistory();
-    if (view === "secrets") refreshSecrets();
-    if (view === "settings") refreshSettings();
+    if (view === "run" && S.currentRun) pollRun().catch((error) => loadFailed("这次运行的详情", error));
+    if (view === "deck") refreshDeck().catch((error) => loadFailed("工作台", error));
+    if (view === "history") refreshHistory().catch((error) => loadFailed("运行历史", error));
+    if (view === "secrets") refreshSecrets().catch((error) => loadFailed("秘密库", error));
+    if (view === "settings") refreshSettings().catch((error) => loadFailed("设置", error));
+    if (view === "agent") refreshAgent().catch((error) => loadFailed("Agent 接口", error));
+  }
+
+  // 一屏没读到就在界面上说清楚，并给一个真的能用的出口（重试），不再留空白。
+  function loadFailed(where, error) {
+    const box = document.querySelector(".view:not([hidden])");
+    if (!box) return;
+    const old = $("load-fail");
+    if (old) old.remove();
+    const bar = document.createElement("div");
+    bar.className = "card loadfail";
+    bar.id = "load-fail";
+    bar.innerHTML = '<span class="t">' + esc(where) + "没有读到</span>"
+      + '<span class="d">' + esc(String((error && error.message) || error || "后端没有返回内容")) + "</span>"
+      + '<button class="btn small" id="load-retry">重试</button>';
+    const head = box.querySelector(".main-head");
+    if (head) head.after(bar); else box.prepend(bar);
+    $("load-retry").onclick = () => { bar.remove(); show(S.view); };
   }
 
   function stopTickers() {
@@ -286,6 +465,17 @@
       note.textContent = ((S.info && S.info.bundled) ? "封装版" : "源码运行") +
         " · " + ((S.info && S.info.state && S.info.state.engine) || "浏览器未启动");
     }
+    // 标题条上写清「这一份到底是哪一版」：只写 __version__ 时，界面改了十几个文件
+    // 程序仍自称同一个版本号，排查时完全分不清屏幕上的是新的还是旧的。
+    const chip = $("ver-chip");
+    if (chip && S.info && S.info.version) {
+      const stamp = S.info.version_stamp || {};
+      chip.textContent = "v" + S.info.version + " · " + (S.info.version_kind || (stamp.bundled ? "封装版" : "源码"));
+      chip.title = "版本 v" + S.info.version + " · " + (S.info.version_kind || "") +
+        (stamp.source_mtime ? " · 代码 " + new Date(stamp.source_mtime * 1000).toLocaleString() : "") +
+        (stamp.ui_mtime ? " · 界面资源 " + new Date(stamp.ui_mtime * 1000).toLocaleString() : "") +
+        (stamp.ui_newer_than_source ? "（界面资源比代码新：重启或重新打包才会用上）" : "");
+    }
   }
 
   async function refreshDeck() {
@@ -296,9 +486,11 @@
     $("nav-workflows").textContent = S.workflows.length;
     $("nav-runs").textContent = S.runs.length;
     $("nav-secrets").textContent = (info.secrets || []).length;
+    $("nav-agent").textContent = info.agent && info.agent.ok ? (info.agent.tools + " 个") : "未启用";
     $("wf-count").textContent = S.workflows.length + " 条";
     $("run-count").textContent = S.runs.length + " 条记录";
     renderStats();
+    renderOnboarding();
     renderWorkflows();
     renderRecent(S.runs.slice(0, 4), "recent-runs");
     applyState(info.state);
@@ -802,71 +994,115 @@
   function renderRun(run, detail) {
     $("run-chips").innerHTML = statusChip(detail.status_class === "rec" ? "running" : detail.status) +
       '<span class="chip mono">' + esc(detail.steps_run + "/" + detail.steps_total) + " 步</span>" +
+      (detail.status !== "running" && detail.steps_verified !== undefined
+        ? '<span class="chip mono">' + esc(detail.steps_verified + " 步已验证") + "</span>" : "") +
+      (detail.status !== "running" && Number(detail.prior_runs || 0) > 0
+        ? '<span class="chip mono warn">本次之前已跑过 ' + esc(detail.prior_runs) + " 次</span>" : "") +
       (detail.resumed && detail.resumed.from_step
         ? '<span class="chip mono warn">本次从 ' + esc(detail.resumed.from_step) + " 续跑 · 前 " +
           esc(detail.resumed.skipped) + " 步未执行</span>" : "");
-    $("run-meta").innerHTML = "<b>" + esc(clock(detail.started_at)) + "</b> · " + esc(detail.duration_s) + "s" +
-      (detail.code ? " · " + esc(detail.code) : "");
+    $("run-meta").innerHTML = "<b>" + esc(runStamp(detail.run_id)) + " · " + esc(clock(detail.started_at)) +
+      "</b> · " + esc(detail.duration_s) + "s" + (detail.code ? " · " + esc(detail.code) : "");
     $("run-cancel").disabled = detail.status !== "running";
     $("run-again").disabled = detail.status === "running";
     const resume = $("run-resume");
     resume.hidden = !detail.resumable;
-    if (detail.resumable) resume.title = "这一步之前没有发出任何动作，从 " + detail.step_id + " 继续跑完剩下的步骤";
+    if (detail.resumable) {
+      resume.textContent = "从第 " + (detail.resume_index || "?") + " 步继续";
+      resume.title = "这一步之前没有发出任何动作，从 " + detail.step_id + " 继续跑完剩下的步骤";
+    }
     S.resumeStep = detail.resumable ? detail.step_id : "";
     S.resumeWorkflow = detail.workflow_id || "";
+    S.detail = detail;
     $("timeline").innerHTML = (detail.timeline || []).map((step, index) =>
       '<div class="card tstep' + (step.state === "rec" ? " active" : "") + '"><span class="lamp ' + esc(step.state) + '"></span>' +
       '<span class="act ' + esc(step.action) + '">' + esc(step.action) + "</span>" +
       '<span class="t">' + esc(step.index + ". " + step.label) + "</span>" +
       '<span class="dur"><span class="status-chip ' + esc(step.state) + '"><span class="lamp ' + esc(step.state) + '"></span>' +
       esc(step.state_label) + '</span><span class="ms">' + esc(step.duration_s) + "s</span></span></div>").join("") ||
-      '<div class="card empty">该运行的工作流已被删除，只有日志保留。</div>';
+      '<div class="card empty">' + esc(timelineNote(detail)) + "</div>";
     const explanation = describeDetail(detail);
+    const why = (detail.reason || "") + (detail.diagnostic ? "\n" + detail.diagnostic : "");
     $("run-detail").innerHTML = '<p class="d-expl">' + explanation + "</p>" +
+      (why ? '<p class="d-why">' + esc(why) + "</p>" : "") +
       '<div class="d-kv"><span class="k">最后阶段</span><span class="v">' + esc((detail.events.slice(-1)[0] || {}).phase || "—") + "</span>" +
       '<span class="k">执行步骤</span><span class="v">' + esc(detail.steps_run + " / " + detail.steps_total) + "</span>" +
       '<span class="k">错误码</span><span class="v" style="color:' + (detail.code ? "var(--bad)" : "var(--ink3)") + '">' + esc(detail.code || "无") + "</span>" +
-      '<span class="k">秘密值</span><span class="v">运行时读取，未落盘</span></div>' +
+      '<span class="k">秘密值</span><span class="v">运行时读取，值不落盘</span></div>' +
       '<div class="d-actions"><button class="btn small" id="run-inspect">在浏览器中查看</button>' +
       '<button class="btn small" id="run-export">导出本次结果</button><span class="d-note">不会自动重试；重启后不自动续跑</span></div>';
     $("run-inspect").onclick = () => guarded("bring_to_front");
     $("run-export").onclick = () => guarded("export_run", S.currentRun).then((result) => { if (result && !result.error) toast("已导出：" + result.path, "ok"); });
     const recheck = $("run-recheck");
     if (detail.uncertain) {
+      const stopped = (detail.timeline || []).filter((row) => row.step_id === detail.step_id)[0] || {};
       recheck.hidden = false;
       recheck.innerHTML = '<div class="rc-t">人工检查清单<span class="n" style="margin-left:auto;font-family:var(--font-mono);font-size:10px;color:var(--warn)">UNCERTAIN 之后</span></div>' +
-        ['打开受控浏览器，确认停在的步骤「' + ((detail.timeline.slice(-1)[0] || {}).label || detail.step_id) + "」是否已经生效。",
-          "若未生效：直接重新运行工作流，动作会从头再次执行。",
-          "若已生效：无需处理，将本次结果按「完成」归档即可。"].map((text, index) =>
-            '<div class="rc-item" data-check="' + index + '"><span class="box"></span><span>' + esc(text) + "</span></div>").join("") +
-        '<p class="rc-note">程序不会根据日志自动续跑，也不会自动重试该动作。</p>';
-      recheck.querySelectorAll(".rc-item").forEach((item) => { item.onclick = () => item.classList.toggle("done"); });
+        ['打开受控浏览器，确认停在的<b>第 ' + Number(detail.resume_index || 0) + ' 步「' +
+          esc(stopped.label || detail.step_id || "") + "」</b>是否已经生效。",
+          "若这一步<b>已经生效</b>：勾掉下面第二条，然后点「已检查：从这一步续跑」——" +
+          "只跑剩下的步骤，前面已经做成的动作不会重做（重跑会把数据叠加一遍）。",
+          "若这一步<b>没有生效</b>：勾掉下面第三条，到设置或业务系统里把留下的痕迹处理掉，再选择重跑方式。"
+        ].map((text, index) =>
+            '<div class="rc-item" data-check="' + index + '"><span class="box"></span><span>' + text + "</span></div>").join("") +
+        '<div class="rc-go"' + (detail.manual_resume ? "" : " data-none=\"1\"") + '>' +
+          '<button class="btn small primary" id="run-resume-checked" ' +
+          (detail.manual_resume ? "disabled" : "") + ">" +
+          (detail.manual_resume ? "已检查：从第 " + (detail.resume_index || "?") + " 步续跑" : "这一步不在工作流里，无法续跑") +
+          "</button><span class=\"rc-tip\">勾满两条才放开：续跑由人做完检查后自己点，程序不替人确认。</span></div>" +
+        '<p class="rc-note">程序不会根据日志自动续跑，也不会自动重试该动作；这一步的动作已经发出过一次，只可能执行了一遍。</p>';
+      const box = recheck.querySelector("#run-resume-checked");
+      recheck.querySelectorAll(".rc-item").forEach((item) => {
+        item.onclick = () => {
+          item.classList.toggle("done");
+          if (box) box.disabled = recheck.querySelectorAll(".rc-item.done").length < 2;
+        };
+      });
+      if (box && detail.manual_resume) {
+        box.onclick = () => {
+          if (box.disabled) return;
+          S.resumeStep = detail.step_id;
+          S.resumeWorkflow = detail.workflow_id || "";
+          runWorkflow(detail.workflow_id, detail.step_id);
+        };
+      }
     } else { recheck.hidden = true; }
     $("j-filename").textContent = "run " + S.currentRun + " · journal.jsonl";
     $("j-body").innerHTML = (detail.events || []).map((event) =>
       '<div class="j-row' + (event.phase === "action_started" ? " hl-action" : "") + (event.phase === "uncertain" ? " hl-uncertain" : "") + '">' +
       '<span class="j-time">' + esc(clock(event.at)) + '</span><span class="j-phase">' + esc(event.phase) + "</span>" +
       '<span class="j-step">' + esc(event.step_id) + "</span>" +
-      (event.code ? '<span class="j-code">' + esc(event.code) + "</span>" : "") + "</div>").join("") ||
+      (event.code ? '<span class="j-code">' + esc(event.code) + "</span>" : "") +
+      (event.reason ? '<span class="j-reason">' + esc(event.reason) + "</span>" : "") + "</div>").join("") ||
       '<div class="j-row">暂无阶段记录</div>';
     $("j-body").scrollTop = $("j-body").scrollHeight;
   }
 
   function describeDetail(detail) {
+    const at = "第 " + Number(detail.resume_index || 0) + " 步「" + esc(detail.step_id || "") + "」";
+    const why = detail.reason ? "：" + esc(detail.reason) : "。";
     if (detail.status === "running") return "回放进行中：每个动作<b>只发出一次</b>，阶段事件先落盘再执行。";
-    if (detail.status === "uncertain") return "动作已发出，且<b>仅执行了 1 次</b>；随后" +
-      (detail.code === "TargetTimeout" ? "完成条件超时" : "驱动报告异常") +
-      "，<b>无法确认页面是否已经生效</b>，请人工检查受控浏览器页面后再决定是否重新运行。";
-    if (detail.status === "failed") return "在动作发生<b>之前</b>就停止了：" + esc(detail.code || "") +
-      "（目标缺失、匹配多个元素或来源已变化）。本次没有点击任何元素，也不会自动重试。" +
-      (detail.resumable ? "停在第 " + (detail.timeline.findIndex((item) => item.step_id === detail.step_id) + 1) +
-        " 步：可以用「从失败步重试」只跑剩下的步骤。" : "");
-    if (detail.status === "cancelled") return "已按停止请求取消：停在步骤 " + esc(detail.step_id || "") +
-      "，这一步的动作没有发出，之后的动作也不会发出。";
+    if (detail.status === "uncertain") return "动作已发出，且<b>仅执行了 1 次</b>；停在 " + at + "，随后" +
+      (detail.code === "TargetTimeout" ? "完成条件没有出现" : "驱动报告异常") + why +
+      "<b>无法确认页面是否已经生效</b>，请按下面的人工检查清单处理。";
+    if (detail.status === "failed") return "停在 " + at + "，在动作发生<b>之前</b>就停止了" +
+      (detail.code ? "（错误码 " + esc(detail.code) + "）" : "") + why +
+      "本次没有点击任何元素，也不会自动重试。" +
+      (detail.resumable ? "修好这一步后用「从第 " + Number(detail.resume_index || 0) + " 步继续」，" +
+        "不必整条重跑。" : "");
+    if (detail.status === "cancelled") return "已按停止请求取消，停在 " + at + "：这一步的动作没有发出，" +
+      "更早的步骤已经执行过（不会重做），之后的动作也不会发出。" +
+      (detail.resumable ? "可以从这一步继续。" : "");
     if (detail.status === "completed_unverified") return "全部步骤执行完毕，其中 " + esc(detail.steps_unverified || 0) +
       " 步没有设完成条件，因此结果记为<b>完成 · 未验证</b>（不是失败，但程序没有证据）。";
     if (detail.status === "unknown") return "内存里没有这次运行，也没有读到它的终态日志；以下时间线只按日志里已有的事件显示。";
     return "全部步骤执行完毕，且设了完成条件的步骤都被验证通过。";
+  }
+
+  // 时间线是按工作流定义排的；定义读不到时（已删除，或本来就是没保存的草稿）不要谎报「已被删除」。
+  function timelineNote(detail) {
+    if (detail.workflow_found) return "这个工作流没有步骤。";
+    return "读不到这次运行的工作流定义：它可能已被删除，或本来就是没保存的草稿 —— 下面只有阶段日志。";
   }
 
   // ---------- history / secrets / settings ----------
@@ -890,7 +1126,10 @@
       '<input type="password" data-secret="' + esc(ref) + '" placeholder="填入真实值，仅保存在本机（当前为空）">' +
       '<button class="btn small primary" data-save="' + esc(ref) + '">保存</button></div>');
     const stored = S.secrets.map((item) => '<div class="row"><span class="ref">' + esc(item.ref) +
-      '</span><span class="len">已存 ' + esc(item.length) + ' 字符</span><span class="secref">' + esc(usage(item.ref)) + "</span>" +
+      '</span><span class="len">' + (item.locked
+        ? "值在本机读不出来（换过 Windows 账户或文件损坏）· 必须重新填写，运行前会被拦下"
+        : "已存 " + esc(item.length) + " 字符") +
+      '</span><span class="secref">' + esc(usage(item.ref)) + "</span>" +
       '<input type="password" data-secret="' + esc(item.ref) + '" placeholder="留空则不修改，输入新值可覆盖">' +
       '<button class="btn small primary" data-save="' + esc(item.ref) + '">更新</button>' +
       '<button class="btn small danger" data-forget="' + esc(item.ref) + '">删除</button></div>');
@@ -924,11 +1163,148 @@
     $("set-headless").querySelector(".txt").textContent = S.settings.headless ? "开启" : "关闭";
     $("set-keep").classList.toggle("on", !!S.settings.keep_browser_open);
     $("set-keep").querySelector(".txt").textContent = S.settings.keep_browser_open ? "开启" : "关闭";
+    const mode = (S.frame && S.frame.mode) || S.settings.window_mode || "docked";
+    document.querySelectorAll("#set-winmode button").forEach((button) => {
+      button.classList.toggle("on", button.dataset.mode === mode);
+    });
+    const frame = S.frame || {};
+    const off = Array.isArray(frame.content) && frame.content.some((n) => Math.abs(n) > 30000);
+    const geom = $("win-geom");
+    if (geom) {
+      geom.textContent = frame.hwnd && !off
+        ? "内容区 " + (frame.content || []).join("×") + " · 窗口 " + (frame.rect || []).join("×")
+          + " · 标题条 " + frame.strip + "px · " + (frame.via || "")
+        : "";
+    }
+    // 标题条高度量不出来时必须说「这一条测不了」，不能显示成 0 像素 ——
+    // 0 在屏幕上就是「没有标题条」，而那时页面顶部其实正被浏览器自己的标题条切掉。
+    const stripNote = frame.strip_note || (frame.pixel_ok === false
+      ? "顶部还差 " + (frame.drift || "?") + " 像素，点「重新测量」校正" : "");
+    $("win-line").textContent = !frame.hwnd ? "还没量到窗口句柄：点「重新测量」"
+      : off ? "窗口现在不在屏幕上（被最小化或推到屏幕外）：点「重新测量」把它拉回来"
+      : frame.mode === "fullscreen" ? "全屏：窗口铺满整块显示器，没有系统标题栏"
+      : frame.mode === "free" ? "自由窗口：顶部 " + (frame.strip || "浏览器自带的") +
+        " 像素是浏览器自带的标题条（可以自由移动的代价），界面里的无边框不适用于这一档"
+      : "停靠无边框：浏览器自带的 " + (frame.strip || "?") + " 像素标题条整段在屏幕外，" +
+        (frame.titlebar_hidden ? "页面从屏幕第一行开始" : "但标题条现在露出来了：点「重新测量」") +
+        (stripNote ? " · " + stripNote : "");
+    $("set-agent").classList.toggle("on", !!S.settings.agent_api);
+    $("set-agent").querySelector(".txt").textContent = S.settings.agent_api ? "开启" : "关闭";
+    $("agent-port-line").textContent = (S.agent && S.agent.url) || ("端口 " + (S.settings.agent_port || 8795));
     $("profile-path").textContent = result.profile_dir || "";
     $("data-path").textContent = result.data_dir || "";
     $("engine-line").textContent = result.engine || "未启动";
     const info = S.info || await call("app_info");
     $("about-line").textContent = "录放台 v" + (info.version || "—") + (info.bundled ? " · 已封装单进程" : " · 源码运行");
+  }
+
+
+  // ---------- Agent 接口这一屏：把「程序就是后端」讲清楚 ----------
+  const RISK_TEXT = { read: ["read", "只读"], write: ["write", "写本机"], exec: ["exec", "真操作页面"] };
+
+  async function refreshAgent() {
+    const info = await call("agent_info");
+    S.agent = info;
+    $("nav-agent").textContent = info.ok ? (info.tools || 0) : "未运行";
+    const state = (S.info && S.info.state) || {};
+    $("agent-stats").innerHTML = [
+      ["服务状态", info.ok ? "正在运行" : "未运行", info.ok ? "与界面同一个进程，Agent 做的每一步这里都看得见" : (info.error || "")],
+      ["端点", info.ok ? info.url.replace(/^http:\/\//, "") : "—", "只监听 127.0.0.1，端口被占自动 +1"],
+      ["工具数", (info.tool_docs || []).length + " 个", "read " + countRisk(info, "read") + " · write " + countRisk(info, "write") + " · exec " + countRisk(info, "exec")],
+      ["已被调用", info.ok ? String(info.calls || 0) + " 次" : "—", "从界面起到现在，Agent 发起的调用次数"]
+    ].map((row) => '<div class="card stat"><p class="k">' + esc(row[0]) + '</p><p class="v">' + esc(String(row[1]))
+      + '</p><p class="d">' + esc(row[2]) + "</p></div>").join("");
+
+    $("agent-endpoint").innerHTML = info.ok
+      ? '<div class="card-t">端点与自检</div><p class="s">健康检查、工具清单、清单里每个工具的入参 schema 都是现成的，'
+      + '不需要读源码，也不需要第二个后台进程。</p>'
+      + '<div class="agent-row"><span class="chip mono">' + esc(info.url) + '</span>'
+      + '<button class="btn small" id="agent-copy-url">复制端点</button>'
+      + '<span class="mut">GET /api/health · GET /api/agent/tools · POST /api/agent/tool</span></div>'
+      + '<p class="composer-hint">MCP 客户端用 <span class="k mono">node agent/mcp-server.mjs</span>；'
+      + '它会在服务没起来时按 <span class="k mono">agent/launch.json</span> 自己拉起。</p>'
+      : '<div class="card-t">端点与自检</div><p class="s bad">' + esc(info.error || "Agent 接口没有运行") + '</p>'
+      + '<p class="composer-hint">这个开关在设置页；打开后重启程序即可让 Agent 直接调用本机工作流库。</p>';
+
+    $("agent-tool-count").textContent = (info.tool_docs || []).length + " 个";
+    $("agent-tools").innerHTML = (info.tool_docs || []).map((tool) => {
+      const risk = RISK_TEXT[tool.risk] || ["read", "只读"];
+      return '<div class="tool-row"><span class="risk ' + esc(risk[0]) + '" title="' + esc(risk[1]) + '">'
+        + esc(risk[0]) + '</span><span class="tn mono">' + esc(tool.name) + '</span>'
+        + '<span class="td">' + esc(tool.description) + "</span>"
+        + '<span class="tp mono">' + esc((tool.required || []).length ? "必填 " + tool.required.join(" · ") : "无必填参数")
+        + "</span></div>";
+    }).join("") || '<p class="s">没有读到工具清单。</p>';
+
+    $("agent-curl").textContent = info.curl || "";
+    $("agent-mcp").textContent = info.mcp || "";
+    const copy = (id, text) => {
+      const button = $(id);
+      if (!button) return;
+      button.onclick = async () => {
+        if (await copyText(text)) toast("已复制到剪贴板", "ok");
+        else showText("复制这段内容", text);
+      };
+    };
+    copy("agent-copy-http", info.curl || "");
+    copy("agent-copy-mcp", info.mcp || "");
+    copy("agent-copy-url", info.url || "");
+  }
+
+  function countRisk(info, risk) {
+    return (info.tool_docs || []).filter((tool) => tool.risk === risk).length;
+  }
+
+  async function agentProbe() {
+    const result = await guarded("agent_probe");
+    if (!result || !result.ok) {
+      toast("自检失败：" + ((result && (result.error || result.message)) || "没有响应"), "bad");
+      return;
+    }
+    toast("自检通过：HTTP " + result.http + " · 本机 " + result.workflows + " 个工作流 · " + result.ms + "ms", "ok");
+  }
+
+  // ---------- 首屏三步上手：只说现在能做的下一步 ----------
+  function renderOnboarding() {
+    const box = $("onboarding");
+    if (!box) return;
+    if (S.settings && S.settings.onboarded) { box.hidden = true; return; }
+    const state = (S.info && S.info.state) || {};
+    const wf = S.workflows.length, runs = S.runs.length;
+    const steps = [
+      { n: 1, t: "录制一次操作", d: "在程序打开的受控浏览器里点一遍，界面把操作整理成可审阅的步骤。",
+        done: wf > 0, now: !wf, action: ["去录制", "() => document.getElementById('record-url').focus()"] },
+      { n: 2, t: "审阅并保存", d: "逐条看定位器与完成条件——多匹配会被标出来要你选一个，绝不退化成坐标点击。",
+        done: wf > 0, now: !!state.state && state.state !== "idle" && state.state !== "running", action: ["看草稿", "draft"] },
+      { n: 3, t: "运行，或交给 Agent", d: "点一下就按同样的步骤重放；也可以让任意 Agent 通过本机接口调用同一套能力。",
+        // 只数「你自己存下来的工作流跑过没有」：自检留下的运行记录不算完成，否则第 1、2 步还空着
+        // 第 3 步就先打了勾，读起来像反话。
+        done: wf > 0 && runs > 0, now: wf > 0 && !runs, action: ["看 Agent 接口", "agent"] }
+    ];
+    box.hidden = false;
+    box.innerHTML = '<div class="ob-head"><span class="t">三步就能用起来</span>'
+      + '<span class="mut">每一步都在本机完成；这里不放示例数据，工作流和运行记录都来自你自己的操作。</span>'
+      + '<button class="btn small" id="ob-dismiss">知道了</button></div>'
+      + steps.map((step) => '<div class="ob-step' + (step.done ? " done" : "") + (step.now ? " now" : "") + '">'
+        + '<span class="ob-n">' + (step.done ? "✓" : step.n) + '</span>'
+        + '<div class="ob-b"><p class="t">' + esc(step.t) + '</p><p class="d">' + esc(step.d) + "</p></div>"
+        + '<button class="btn small' + (step.now ? " primary" : "") + '" data-ob="' + step.n + '">'
+        + esc(step.action[0]) + "</button></div>").join("");
+    const dismiss = $("ob-dismiss");
+    if (dismiss) dismiss.onclick = async () => {
+      try { await guarded("settings_set", { onboarded: true }); } catch (error) { }
+      S.settings.onboarded = true;
+      box.hidden = true;
+      toast("已收起上手引导（设置页里可以重新打开）", "info");
+    };
+    box.querySelectorAll("[data-ob]").forEach((button) => {
+      button.onclick = () => {
+        const which = button.dataset.ob;
+        if (which === "1") { show("deck"); setTimeout(() => $("record-url").focus(), 120); }
+        else if (which === "2") { if (S.draft) show("review"); else toast("还没有草稿：先完成第 1 步录制", "info"); }
+        else show("agent");
+      };
+    });
   }
 
   // ---------- wiring ----------
@@ -942,7 +1318,7 @@
         else if (!$("modal-close").hidden) $("modal-close").click();
         return;
       }
-      const order = ["deck", "history", "secrets", "settings"];
+      const order = ["deck", "history", "secrets", "agent", "settings"];
       if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
         const index = parseInt(event.key, 10);
         if (index >= 1 && index <= order.length) { event.preventDefault(); show(order[index - 1]); }
@@ -1005,7 +1381,22 @@
         "这一步之前没有发出任何动作，所以从它开始接着跑完剩下的步骤；已执行过的步骤不会重跑。"))) return;
       await runWorkflow(S.resumeWorkflow, S.resumeStep);
     };
-    $("run-again").onclick = () => { if (S.runWorkflowId) runWorkflow(S.runWorkflowId); else runDraftNow().catch(() => { }); };
+    $("run-again").onclick = async () => {
+      if (!S.runWorkflowId) { await runDraftNow().catch(() => { }); return; }
+      // 重复运行会在真实系统里再叠一条数据，而浏览器自动化没法幂等 —— 所以这一眼必须先看历史。
+      const detail = S.detail || {};
+      const prior = Number(detail.prior_runs || 0);
+      if (prior > 0) {
+        const lines = ["这个工作流在本次之前已经记到 " + prior + " 次运行，最近一次是 " +
+          runStamp(detail.run_id) + "（" + (detail.status_label || detail.status || "—") + "）。",
+          "浏览器自动化按原样把动作再执行一遍：提交表单、点按钮这类步骤会在目标系统里再产生一条数据。",
+          Number(detail.prior_completed || 0) > 0
+            ? "只想补跑失败或未确认的那一步，请关窗后用「从第 N 步继续」；确实要再做一整遍再点确认。"
+            : "确实要再跑一整遍请点确认。"];
+        if (!(await ask("确认再运行一遍？", lines.join(" ")))) return;
+      }
+      await runWorkflow(S.runWorkflowId);
+    };
     $("wf-list").onclick = (event) => handleWorkflowClick(event);
     $("recent-runs").onclick = (event) => handleRunClick(event);
     $("history-list").onclick = (event) => handleRunClick(event);
@@ -1030,6 +1421,54 @@
     };
     $("set-headless").onclick = () => toggleSwitch("set-headless");
     $("set-keep").onclick = () => toggleSwitch("set-keep");
+    document.querySelectorAll("#set-winmode button").forEach((button) => {
+      button.onclick = async () => {
+        const wanted = button.dataset.mode;
+        let result = null;
+        try { result = await guarded("win_mode", wanted); }
+        catch (error) { result = { ok: false, error: String((error && error.message) || error) }; }
+        if (!result || !result.ok) {
+          toast("切换失败：" + ((result && result.error) || "当前引擎不支持这个窗口模式")
+            + "——界面仍可用；想换回去再点一次，或看设置页「当前窗口实测」", "bad");
+          await syncFrame(6);
+          refreshSettings().catch(() => { });
+          return;
+        }
+        await syncFrame(6);
+        toast("已切到" + (MODE_TEXT[result.mode] || result.mode) +
+          (result.titlebar_hidden ? "：标题条已顶出屏幕" : "：顶部会露出浏览器自带的标题条"),
+          result.titlebar_hidden ? "ok" : "warn");
+        refreshSettings();
+      };
+    });
+    $("agent-refresh").onclick = () => refreshAgent().catch(() => { });
+    $("agent-probe").onclick = () => agentProbe().catch(() => { });
+    $("set-agent").onclick = async () => {
+      const on = !$("set-agent").classList.contains("on");
+      await guarded("settings_set", { agent_api: on });
+      S.settings.agent_api = on;
+      refreshSettings().catch(() => { });
+      toast(on ? "已允许 Agent 调用：下次启动程序时开始监听（现在先点下面的按钮立即生效）"
+               : "已关闭：下次启动生效。界面本身不受影响", "info");
+    };
+    $("set-onboarding").onclick = async () => {
+      try { await guarded("settings_set", { onboarded: false }); } catch (error) { }
+      S.settings.onboarded = false;
+      renderOnboarding();
+      show("deck");
+      toast("上手引导已回到工作台顶部", "ok");
+    };
+    $("set-winrefresh").onclick = async () => {
+      const result = await guarded("win_remeasure");
+      await syncFrame(6);
+      refreshSettings().catch(() => { });
+      if (result && result.pixel_ok === false) {
+        toast("像素复核仍有 " + (result.drift || "?") + " 像素偏差：" + (result.place_error || "已按实际位置继续"), "warn");
+      } else {
+        toast("已重新测量：标题条 " + ((result && result.strip) || 0) + "px 已顶出屏幕，内容区 "
+          + (((result && result.content) || []).join("×")), "ok");
+      }
+    };
     $("set-profile").onclick = async () => {
       if (!(await ask("清空受控浏览器的登录态与缓存？", "工作流、日志和秘密库不受影响。"))) return;
       const r = await guarded("reset_profile");
@@ -1081,11 +1520,17 @@
   }
 
   async function runSelfCheck() {
-    $("set-selfcheck").disabled = true;
-    $("set-selfcheck").textContent = "自检运行中…";
-    const result = await call("selfcheck");
-    $("set-selfcheck").disabled = false;
-    $("set-selfcheck").textContent = "运行端到端自检";
+    const button = $("set-selfcheck");
+    button.disabled = true;
+    button.textContent = "自检运行中…";
+    let result;
+    try {
+      result = await call("selfcheck");
+    } finally {
+      // 后端拒绝（比如正在录制）也要把按钮放回可点状态，否则它会永远停在「自检运行中…」
+      button.disabled = false;
+      button.textContent = "运行端到端自检";
+    }
     if (result && result.error) return;
     const lines = (result.results || []).map((item) =>
       '<div class="ck ' + (item.ok ? "ok" : "bad") + '"><span class="mark">' + (item.ok ? "✓" : "✕") + "</span><span>" +

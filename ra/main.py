@@ -6,13 +6,23 @@ import sys
 import threading
 from pathlib import Path
 
+from .agentapi import AgentServer
 from .api import Api
+from .diagnostics import RunDiagnostics
 from .journal import FileJournal
 from .paths import APP_TITLE, browsers_path_env, data_root, resource_root
 from .secrets import FileSecretStore
 from .session import Session
 from .shell import Shell
 from .store import Settings, WorkflowStore
+
+
+def start_agent_server(api: Api, session: Session, port: int = 8795) -> AgentServer:
+    """在同一个进程里起 Agent 接口：Agent 与界面共用一套会话，界面上能实时看到它做了什么。"""
+    server = AgentServer(api=api, session=session, port=port).start()
+    if server.error:
+        print(f"[agent-api] 未能启动：{server.error}", file=sys.stderr)
+    return server
 
 
 def build(data_dir: str | Path | None = None):
@@ -30,6 +40,8 @@ def build(data_dir: str | Path | None = None):
         script_path=resources / "ui" / "record_script.js",
         profile_dir=root / "profile",
     )
+    # 失败/未确认/取消的真实原因单独落盘（秘密值已脱敏），历史运行重启后仍答得出为什么。
+    session.diagnostics = RunDiagnostics(root / "run-diagnostics.jsonl")
     api = Api(session, store, secrets, settings, journal)
     session.notify = api.push
     return api, session, root
@@ -79,6 +91,11 @@ def _selfcheck_only(root: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv if argv is not None else sys.argv[1:])
     verify = "--verify" in argv
+    audit = "--audit" in argv
+    if audit:
+        import os
+
+        os.environ["RA_UI_AUDIT"] = "1"        # 让桥接记录每次点击调了哪个后端方法
     browsers_path_env()                      # 应用窗口与受控浏览器都要用同一个引擎解析
     api, session, root = build()
     resources = resource_root()
@@ -91,16 +108,31 @@ def main(argv: list[str] | None = None) -> int:
         session.shutdown()
         return code
 
-    shell = Shell(resources / "ui", root / "shell-profile", dispatcher(api), on_close=session.shutdown)
+    settings = api.settings.all()
+    mode = str(settings.get("window_mode") or "docked")
+    if settings.get("window_fullscreen"):        # 兼容旧设置：只有全屏一个开关
+        mode = "fullscreen"
+    shell = Shell(resources / "ui", root / "shell-profile", dispatcher(api), on_close=session.shutdown,
+                  mode=mode, geometry=settings.get("window_geom") or {},
+                  on_geometry=lambda content, chosen: api.settings.update({
+                      "window_geom": {"x": int(content[0]), "y": int(content[1]),
+                                      "w": int(content[2]), "h": int(content[3])},
+                      "window_mode": chosen}))
     api.attach(shell)
+    agent_server = None
+    if bool(settings.get("agent_api")):
+        agent_server = start_agent_server(api, session, int(settings.get("agent_port") or 8795))
+        api.agent_server = agent_server
     outcome = {"code": 0}
 
     def boot() -> None:
         site = None
         target = ""
+        headless_before = None
         try:
             if verify:
                 target, site = _verify_url(argv)
+                headless_before = bool(api.settings.all().get("headless"))
                 api.settings.update({"headless": True})
             api.push("ready", api.app_info())
             if verify:
@@ -108,13 +140,21 @@ def main(argv: list[str] | None = None) -> int:
 
                 outcome["code"] = uiverify.run(shell, target, root / "ui-shots", session)
                 (root / "verify-report.txt").write_text(f"exit={outcome['code']}\nurl={target}\n", encoding="utf-8")
+            if audit:
+                from . import uiaudit
+
+                outcome["code"] = uiaudit.run(shell, root)
+                (root / "audit-exit.txt").write_text(f"exit={outcome['code']}\n", encoding="utf-8")
         except Exception as exc:  # 自检异常也要报告
             outcome["code"] = 1
             (root / "verify-report.txt").write_text(f"exit=1\nerror={type(exc).__name__}: {exc}\n", encoding="utf-8")
         finally:
             if site is not None:
                 site.stop()
-            if verify:
+            if headless_before is not None:
+                # 自检借用的是用户真实的数据目录：不能把 headless 留在自检要的值上
+                api.settings.update({"headless": headless_before})
+            if verify or audit:
                 shell.close()
 
     try:
@@ -129,6 +169,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     threading.Thread(target=boot, name="ra-boot", daemon=True).start()
     shell.wait()
+    if agent_server is not None:
+        agent_server.stop()
     session.shutdown()
     return int(outcome["code"])
 

@@ -58,24 +58,33 @@ class FileSecretStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._values: dict[str, str] = {}
+        # References whose ciphertext exists on disk but cannot be decrypted by *this*
+        # Windows account (written by another user, copied between machines, or damaged).
+        # They are deliberately not treated as available values.
+        self._unreadable: set[str] = set()
         self._uses_dpapi = os.name == "nt"
         self._load()
 
     def _load(self) -> None:
         if not self.path.exists():
             return
-        with open(self.path, encoding="utf-8") as handle:
-            raw = json.load(handle)
+        try:
+            with open(self.path, encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except (json.JSONDecodeError, OSError):
+            return
+        if not isinstance(raw, dict):
+            return
         for ref, blob in raw.items():
             try:
-                self._values[ref] = self._decode(blob)
+                self._values[str(ref)] = self._decode(blob)
             except Exception:
-                # A value written by another Windows user or a corrupted store is
-                # unusable; report the reference as missing rather than crashing.
-                self._values[ref] = ""
+                # An unusable value must read as *missing*: otherwise a run would fill the
+                # field with an empty string and still call the step verified.
+                self._unreadable.add(str(ref))
 
     def _decode(self, blob: str) -> str:
-        data = base64.b64decode(blob)
+        data = base64.b64decode(str(blob))
         if self._uses_dpapi:
             data = _dpapi(data, protect=False)
         return data.decode("utf-8")
@@ -104,11 +113,17 @@ class FileSecretStore:
     def set(self, reference: str, value: str) -> None:
         with self._lock:
             self._values[reference] = value
+            self._unreadable.discard(reference)        # rewriting it makes it usable again
             self._flush()
 
     def has(self, reference: str) -> bool:
         with self._lock:
             return reference in self._values
+
+    def locked(self) -> list[str]:
+        """Names of references present on disk but not decryptable here — never their values."""
+        with self._lock:
+            return sorted(self._unreadable)
 
     def refs(self) -> list[str]:
         with self._lock:
@@ -117,11 +132,14 @@ class FileSecretStore:
     def preview(self) -> list[dict]:
         """Names and length only — never the value."""
         with self._lock:
-            return [{"ref": ref, "length": len(self._values[ref])} for ref in sorted(self._values)]
+            rows = [{"ref": ref, "length": len(self._values[ref])} for ref in sorted(self._values)]
+            rows += [{"ref": ref, "length": 0, "locked": True} for ref in sorted(self._unreadable)]
+            return rows
 
     def delete(self, reference: str) -> None:
         with self._lock:
             self._values.pop(reference, None)
+            self._unreadable.discard(reference)
             self._flush()
 
 

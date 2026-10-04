@@ -1,7 +1,8 @@
 """Durable append-only run journal.
 
-Events carry identifiers, phase names and error codes only — never page content,
-user input or secret material.
+Events carry identifiers, phase names, error codes and — for terminal phases only — a
+redacted one-line reason. Page input values and secret material are scrubbed upstream
+(``Runner.scrub``) before they can ever reach this file.
 """
 
 from __future__ import annotations
@@ -37,6 +38,11 @@ class FileJournal:
             "phase": event.phase,
             "code": event.code,
         }
+        # 失败原因跟着终态阶段一起落盘：程序重启之后，历史运行仍然答得出「为什么停在这一步」。
+        # 内容是错误码 + 定位器/超时这类可诊断信息，不含输入值与秘密值（脱敏在 session 侧做）。
+        reason = str(getattr(event, "reason", "") or "")
+        if reason:
+            record["reason"] = reason[:2000]
         line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
         with self._lock:
             with open(self.path, "a", encoding="utf-8") as handle:

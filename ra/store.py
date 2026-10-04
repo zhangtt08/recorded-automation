@@ -20,6 +20,14 @@ DEFAULT_SETTINGS = {
     "headless": False,
     "proxy_server": "",
     "keep_browser_open": True,
+    "window_fullscreen": False,
+    # 界面窗口形态：docked = 停靠屏幕顶边、标题条完全由程序自己画（默认，无边框）
+    # free = 可自由移动的窗口（会露出 Chromium 自绘的标题条）；fullscreen = 占满整块显示器
+    "window_mode": "docked",
+    "window_geom": {},
+    "onboarded": False,
+    "agent_api": True,
+    "agent_port": 8795,
 }
 
 
@@ -122,18 +130,18 @@ class WorkflowStore:
         workflow = workflow_from_dict(clean)
         if not ID_RE.match(workflow.id):
             raise ValueError("工作流 ID 只能包含字母、数字、下划线和短横线")
-        self._file(workflow.id).write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+        JsonFile(self._file(workflow.id), {}).write(clean)
         return report
 
     def load(self, workflow_id: str) -> dict:
-        path = self.root / f"{workflow_id}.workflow.json"
+        path = self._file(workflow_id)
         if not path.exists():
             raise KeyError(workflow_id)
         with open(path, encoding="utf-8") as handle:
             return json.load(handle)
 
     def delete(self, workflow_id: str) -> None:
-        path = self.root / f"{workflow_id}.workflow.json"
+        path = self._file(workflow_id)
         if path.exists():
             path.unlink()
 
@@ -166,4 +174,6 @@ class WorkflowStore:
         return rows
 
     def _file(self, workflow_id: str) -> Path:
+        if not isinstance(workflow_id, str) or not ID_RE.fullmatch(workflow_id):
+            raise ValueError("工作流 ID 只能包含字母、数字、下划线和短横线")
         return self.root / f"{workflow_id}.workflow.json"

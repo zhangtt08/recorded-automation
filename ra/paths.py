@@ -55,3 +55,31 @@ def browsers_path_env() -> None:
 
 def new_run_id() -> str:
     return uuid4().hex[:12]
+
+
+def version_stamp() -> dict:
+    """这一份到底是哪一版：版本号 + 界面文件是不是比代码新 + 是不是封装版。
+
+    踩过的坑：`__version__` 写死成 1.0.0，界面改了十几个文件之后程序仍自称 1.0.0，
+    于是「看到的是旧界面、版本号却是新的」这种问题完全查不动。现在界面资源只要比
+    `ra/__init__.py` 新，就明说这份构建落后于代码（dev 常态，如实写着）。
+    """
+    from . import __version__
+
+    try:
+        source = round(Path(__file__).resolve().with_name("__init__.py").stat().st_mtime, 1)
+    except OSError:
+        source = 0.0
+    root = resource_root()
+    newest_ui, names = source, []
+    for name in ("ui/index.html", "ui/app.js", "ui/app.css", "workflow.schema.json"):
+        path = root / name
+        try:
+            stamp = round(path.stat().st_mtime, 1)
+        except OSError:
+            continue
+        names.append(path.name)
+        newest_ui = max(newest_ui, stamp)
+    return {"version": __version__, "source_mtime": source, "ui_mtime": newest_ui,
+            "ui_files": len(names), "ui_newer_than_source": bool(source) and newest_ui > source,
+            "frozen": bool(getattr(sys, "frozen", False)), "bundled": bool(getattr(sys, "_MEIPASS", None))}
