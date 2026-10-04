@@ -132,6 +132,12 @@ schema 校验 → confirm。
 - **超时**：`wait_s`（默认 180，上限 900，`0` = 只发起不等待）到点按程序已有的取消路径处理，
   `timed_out:true` 会说出来，绝不写成「完成」。
 - **候选事件不是可信事实**：`ra.record_*` 拿到的草稿仍需审阅（人工或 `ra.edit_step`）才会保存为工作流。
+- **运行日志有上界，且删过档会说出来**：`journal.jsonl` 单份 2MB 到线就整份轮转、留 2 份归档，
+  被挤出去的最旧一份会删除。`ra.status` 的返回里总带 `journal`
+  （`bytes / files / rotations / dropped_bytes / trimmed / note`）；`ra.run_history` 查不到某个
+  `run_id` 时错误信息带同一句话，不带 `run_id` 的列表调用只在真的轮转过（`trimmed = true`）时才附上
+  `journal` —— 没轮转过时那份列表本来就是全部，附它只是多一屏噪声。
+  看到 `journal.trimmed = true` 就要知道「这份列表不是全部历史」。
 
 ## 自检
 

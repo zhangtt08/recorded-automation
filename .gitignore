@@ -29,6 +29,9 @@ ENV/
 /ms-playwright/
 /profile/
 /shell-profile/
+# .ra-tmp/ 是排查浏览器问题留下的 Chromium 档案，里面有这个账号真实的 Cookies 与 Login Data。
+# 它留在磁盘上有用，但绝不能进版本库；根锚定写，裸 `.ra-tmp/` 会连子目录一起放过。
+/.ra-tmp/
 /exports/
 /ui-shots/
 /selfcheck/
