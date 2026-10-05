@@ -129,7 +129,7 @@ class GuardUnitTests(unittest.TestCase):
         localguard.check_token("POST", {localguard.TOKEN_HEADER: "whatever"}, "whatever")
         localguard.check_token("POST", {"authorization": "Bearer whatever"}, "whatever")
         # 头名不区分大小写（浏览器与 curl 的写法各不相同）
-        localguard.check_token("POST", {"X-Agent-Token": "whatever"}, "whatever")
+        localguard.check_token("POST", {localguard.TOKEN_HEADER.upper(): "whatever"}, "whatever")
 
     def test_token_file_is_persisted_not_rotated_per_request(self):
         with tempfile.TemporaryDirectory() as tmp:

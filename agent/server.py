@@ -119,7 +119,7 @@ def serve(project: dict[str, Any], tools: list[dict[str, Any]], port: int = 8795
             elif route == "/api/agent/tools":
                 self._send(200, {"ok": True, "data": [descriptor(t) for t in tools]})
             elif route == "/api/agent/manifest":
-                self._send(200, {"ok": True, "data": {"project": project["name"], "version": project.get("version", "0.0.0"), "description": project.get("summary", ""), "base_url": f"http://{host}:{bound_port}", "auth": "token", "token_file": str(token_path), "tools": [descriptor(t) for t in tools]}})
+                self._send(200, {"ok": True, "data": {"project": project["name"], "version": project.get("version", "0.0.0"), "description": project.get("summary", ""), "base_url": f"http://{host}:{bound_port}", "tools": [descriptor(t) for t in tools], "api": {"token_header": localguard.TOKEN_HEADER, "token_env": localguard.TOKEN_ENV, "token_file": str(token_path)}}})
             else:
                 self._send(404, {"ok": False, "error": {"code": "not_found", "message": f"未知路径 {route}", "endpoints": ["/api/health", "/api/agent/tools", "/api/agent/manifest", "POST /api/agent/tool"]}})
 

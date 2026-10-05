@@ -16,7 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const PROTOCOL = '2.2.0';
 const SERVER_INFO = { name: path.basename(PROJECT_ROOT) + '-agent-api', version: '1.0.0' };
-const TOKEN_HEADER = 'x-agent-token';
+const TOKEN_HEADER = 'x-ra-token';
 
 const log = (...a) => process.stderr.write(`[mcp] ${a.join(' ')}\n`);
 

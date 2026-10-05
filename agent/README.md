@@ -14,7 +14,7 @@
 | 绑定 | 只 bind `127.0.0.1` | — |
 | `Host` | 必须是 `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>`（带了端口就要对得上） | 403 `host_not_allowed` |
 | `Origin` / `Referer` | 缺省放行（curl / node 不发）；带了就必须是回环 http(s) 源 | 403 `origin_not_allowed` |
-| 令牌 | **所有非 GET** 必带 `x-agent-token`（也收 `authorization: bearer`），定时安全比较 | 401 `token_required` |
+| 令牌 | **所有非 GET** 必带 `x-ra-token`（也收 `authorization: bearer`），定时安全比较 | 401 `token_required` |
 | CORS | 任何响应都不发 `access-control-allow-origin`；`OPTIONS` 预检也不给 ACAO/allow-methods/allow-headers | 浏览器页面在预检阶段就被拦下 |
 
 ⚠ `Origin` 只与「回环地址清单」这个常量比，**绝不与本次请求的 `Host` 比** —— DNS rebinding 时两者恰好相等，
@@ -39,7 +39,7 @@
 ```bash
 TOKEN="$(cat "$LOCALAPPDATA/RecordedAutomation/agent-token")"
 curl -s -X POST http://127.0.0.1:8795/api/agent/tool \
-  -H 'content-type: application/json' -H "x-agent-token: $TOKEN" \
+  -H 'content-type: application/json' -H "x-ra-token: $TOKEN" \
   -d '{"tool":"ra.status","input":{}}'
 ```
 
@@ -151,8 +151,9 @@ schema 校验 → confirm。
 python -m unittest discover -s tests -t .      # 后端、契约、防护闸门与界面脚本语法门
 python -m ra.main --selfcheck                  # 录制→审阅→校验→回放整链（真实浏览器 + 本机站点）
 python -m ra.main --verify                     # 窗口内界面自检（含 Agent 屏与窗口形态）
-python tools/verify.py                         # 一条命令的门禁：上面第一条 + --selfcheck + 仓库卫生 + 端点契约
 ```
+
+没有单独的 tools/verify.py 一键门禁——门禁就是上面三条命令按顺序跑（先单元/契约，再真实浏览器整链，再界面自检）。
 
 `tests/test_agent_guard.py` 用真实 HTTP 请求打这两个服务（独立那一个真起子进程），逐条验：
 伪造 `Host` 拒、`Origin: http://evil.test` 的跨源 POST 拒、没带令牌拒、从令牌文件取值的合法本机调用成功、

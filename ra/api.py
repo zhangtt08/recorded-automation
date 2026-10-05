@@ -515,7 +515,7 @@ class Api:
                             f'TOKEN="{token_path}"\n'
                             f"curl -s -X POST {base}/api/agent/tool "
                             f"-H 'content-type: application/json' "
-                            f'-H "x-agent-token: $(cat "$TOKEN")" '
+                            f'-H "x-ra-token: $(cat "$TOKEN")" '
                             f"-d '{{\"tool\":\"ra.status\",\"input\":{{}}}}'")
             info["token_note"] = ("所有写操作都要带本机共享令牌。MCP 桥（agent/mcp-server.mjs）会自动读上面那个"
                                   "文件，合法的本机 Agent 不需要手工传；只有 curl / PowerShell 手动调用才要自己带上。")
@@ -538,7 +538,7 @@ class Api:
             url = f"http://127.0.0.1:{server.port}/api/agent/tool"
             headers = {"content-type": "application/json"}
             if server.token:
-                headers["x-agent-token"] = server.token      # 自测也要过同一道闸门，否则它证明不了什么
+                headers["x-ra-token"] = server.token      # 自测也要过同一道闸门，否则它证明不了什么
             request = urllib.request.Request(
                 url, data=json.dumps({"tool": "ra.status", "input": {}}).encode("utf-8"),
                 headers=headers, method="POST")

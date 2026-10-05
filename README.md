@@ -81,13 +81,13 @@ curl -s http://127.0.0.1:8795/api/agent/tools
 # 写操作（非 GET）要带本机共享令牌；令牌由程序启动时写进 %LOCALAPPDATA%\RecordedAutomation\agent-token
 TOKEN="$(cat "$LOCALAPPDATA/RecordedAutomation/agent-token")"
 curl -s -X POST http://127.0.0.1:8795/api/agent/tool -H 'content-type: application/json' \
-     -H "x-agent-token: $TOKEN" -d '{"tool":"ra.status","input":{}}'
+     -H "x-ra-token: $TOKEN" -d '{"tool":"ra.status","input":{}}'
 node agent/mcp-server.mjs        # MCP stdio 桥：自动读令牌文件，本机合法 Agent 不需要手工传
 python agent/server.py           # 不想开界面时，也能单独起一个同契约的服务（同一把令牌）
 ```
 
 **谁能调用**：只监听 127.0.0.1，并且每个请求都过 `ra/localguard.py` 的四道闸门 —— `Host` 必须是回环名
-（挡 DNS rebinding）、`Origin`/`Referer` 不是回环就拒、所有非 GET 必带 `x-agent-token`、
+（挡 DNS rebinding）、`Origin`/`Referer` 不是回环就拒、所有非 GET 必带 `x-ra-token`、
 任何响应都不发通配 CORS（网页连预检都过不去）。这一条是 2026-10-05 验收返工补的：
 补之前用户访问的任意网页都能驱动全部 25 个工具。判据、令牌位置与手动调用写法详见 `agent/README.md`。
 

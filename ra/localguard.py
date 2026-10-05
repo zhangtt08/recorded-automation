@@ -13,7 +13,7 @@
    `Origin`/`Referer` 只和「回环地址清单」比，参考的是常量而不是自己的 Host。
 3. **`Origin` / `Referer` 不是回环就拒**（`{ok:false,error:{code:...}}` + HTTP 403）。
    非浏览器客户端（curl、node、MCP 桥）不发这两个头，照常放行。
-4. **非 GET 必须带共享令牌**（`x-agent-token`，定时安全比较）。令牌是每次服务启动时从
+4. **非 GET 必须带共享令牌**（`x-ra-token`，定时安全比较）。令牌是每次服务启动时从
    `token_file()` 读出来的本机秘密：谁读不到这个文件，谁就调用不了工具。
 
 另外两条不属于本模块但必须一起成立：响应里**不再有 `access-control-allow-origin: *`**（任何路由都
@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-TOKEN_HEADER = "x-agent-token"
+TOKEN_HEADER = "x-ra-token"
 TOKEN_ENV = "RA_AGENT_TOKEN"
 TOKEN_FILE_ENV = "RA_AGENT_TOKEN_FILE"
 ENDPOINT_FILE_ENV = "RA_AGENT_ENDPOINT_FILE"
@@ -251,7 +251,7 @@ def token_matches(candidate: str | None, expected: str) -> bool:
 
 
 def check_token(method: str, headers: Any, expected: str) -> None:
-    """非 GET 必须带正确的 `x-agent-token`（也接受 `authorization: bearer <token>`）。"""
+    """非 GET 必须带正确的 `x-ra-token`（也接受 `authorization: bearer <token>`）。"""
     if (method or "GET").upper() == "GET":
         return
     snapshot = header_snapshot(headers)

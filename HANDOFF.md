@@ -315,7 +315,7 @@ app.js 一处引号未转义让整屏界面停在"正在连接后端"；界面�
 | 绑定 | 只 bind `127.0.0.1`（原来就是） | — |
 | `Host` | `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>`，端口带了必须等于自己这一台 | 403 `host_not_allowed` |
 | `Origin` / `Referer` | 不发 = 非浏览器客户端，放行；发了必须是回环 http(s) 源 | 403 `origin_not_allowed` |
-| 令牌 | 所有非 GET 必带 `x-agent-token`（`authorization: bearer` 也收），`hmac.compare_digest` | 401 `token_required` |
+| 令牌 | 所有非 GET 必带 `x-ra-token`（`authorization: bearer` 也收），`hmac.compare_digest` | 401 `token_required` |
 | CORS | 任何响应都不发 `access-control-allow-origin`；`OPTIONS` 不给 ACAO / allow-methods / allow-headers | 网页卡在预检 |
 
 **`Origin` 只与回环清单这个常量比，绝不与本次请求的 `Host` 比。** 评审点名的 DNS rebinding 就是这个形状：
@@ -534,7 +534,7 @@ stop、调用点没跟上」这个印象不成立：漏的是那份**从未提�
   没有 confirm 入参」这一条已经不再出现**（风险档与 confirm 的判据是它读的 `GET /api/agent/tools`，
   25 个工具全表通过）。
 - ⚠ **留给 personal-agent-hub 的一条（不是本仓库能修的）**：同一个验收器现在在 ra 上另有 3 条红，
-  全是 `401 token_required` —— 它的 POST 不带 `x-agent-token`。这是 `69f8541` 加本机闸门之后的必然结果：
+  全是 `401 token_required` —— 它的 POST 不带 `x-ra-token`。这是 `69f8541` 加本机闸门之后的必然结果：
   闸门按设计生效了，验收器还不知道要出示令牌（本仓库的 `agent/mcp-server.mjs` 每次调用现读令牌文件，
   是合法路径的参考实现）。要修的是那边：读 `%LOCALAPPDATA%\RecordedAutomation\agent-token` 并加进请求头。
   **放宽本仓库的闸门不是一条修法**，把那边判据改松也不是（本轮明令不许）。
